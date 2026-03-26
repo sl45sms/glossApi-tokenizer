@@ -1,5 +1,8 @@
 # glossApi-Tokenizer
 
+![Tokenizer Visualizer](./assets/tokens.png)
+[app screenshot](./assets/tokenizer_visualizer.png)
+
 The aim of this project is to adapt the tokenizer of `swiss-ai/Apertus-8B-Instruct-2509` so it handles Greek more efficiently.
 
 The current workflow is:
