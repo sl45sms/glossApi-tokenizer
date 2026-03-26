@@ -1,0 +1,8 @@
+accelerate
+datasets
+gradio
+huggingface_hub
+safetensors
+sentencepiece
+tokenizers
+transformers
