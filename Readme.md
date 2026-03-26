@@ -147,6 +147,7 @@ Start the local web UI on `http://localhost:7860/`:
 ```bash
 ./run_visualizer.sh
 ```
+* you can stop the visualizer with `pkill -f "python visualizer/app.py"`
 
 The UI sends each non-empty line of input text to `scripts/compare_tokenizers.py` and displays the summary, per-sample tokenization, and raw JSON report.
 
