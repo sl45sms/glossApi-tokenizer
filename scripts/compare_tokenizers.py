@@ -12,12 +12,19 @@ DEFAULT_REFERENCE_TOKENIZER = "ilsp/Llama-Krikri-8B-Instruct"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare Greek segmentation between the Apertus tokenizer and a Greek reference tokenizer."
+        description=(
+            "Compare Greek segmentation between the base Apertus tokenizer, an optional extended Apertus "
+            "tokenizer, and a Greek reference tokenizer."
+        )
     )
     parser.add_argument(
         "--base-tokenizer",
         default=DEFAULT_BASE_TOKENIZER,
         help="Hugging Face model id or local path for the base tokenizer.",
+    )
+    parser.add_argument(
+        "--extended-tokenizer",
+        help="Optional local path or Hugging Face id for an extended Apertus tokenizer.",
     )
     parser.add_argument(
         "--reference-tokenizer",
@@ -81,26 +88,29 @@ def chars_per_token(text: str, token_count: int) -> float:
     return round(len(text) / token_count, 4)
 
 
-def compare_sample(base_tokenizer, reference_tokenizer, text: str) -> Dict[str, Any]:
-    base_ids = base_tokenizer.encode(text, add_special_tokens=False)
-    reference_ids = reference_tokenizer.encode(text, add_special_tokens=False)
+def analyze_tokenization(tokenizer, text: str) -> Dict[str, Any]:
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+    tokens = tokenizer.convert_ids_to_tokens(token_ids)
+    decoded_pieces = [tokenizer.decode([token_id], clean_up_tokenization_spaces=False) for token_id in token_ids]
 
-    base_tokens = base_tokenizer.convert_ids_to_tokens(base_ids)
-    reference_tokens = reference_tokenizer.convert_ids_to_tokens(reference_ids)
-    base_decoded_pieces = [
-        base_tokenizer.decode([token_id], clean_up_tokenization_spaces=False) for token_id in base_ids
-    ]
-    reference_decoded_pieces = [
-        reference_tokenizer.decode([token_id], clean_up_tokenization_spaces=False)
-        for token_id in reference_ids
-    ]
+    return {
+        "token_ids": token_ids,
+        "tokens": tokens,
+        "decoded_pieces": decoded_pieces,
+        "token_count": len(tokens),
+    }
 
-    base_count = len(base_tokens)
-    reference_count = len(reference_tokens)
+
+def compare_sample(base_tokenizer, reference_tokenizer, text: str, extended_tokenizer=None) -> Dict[str, Any]:
+    base_analysis = analyze_tokenization(base_tokenizer, text)
+    reference_analysis = analyze_tokenization(reference_tokenizer, text)
+
+    base_count = base_analysis["token_count"]
+    reference_count = reference_analysis["token_count"]
     delta = base_count - reference_count
     reduction_pct = 0.0 if base_count == 0 else round((delta / base_count) * 100, 2)
 
-    return {
+    sample_report = {
         "text": text,
         "base_token_count": base_count,
         "reference_token_count": reference_count,
@@ -108,11 +118,38 @@ def compare_sample(base_tokenizer, reference_tokenizer, text: str) -> Dict[str, 
         "reference_chars_per_token": chars_per_token(text, reference_count),
         "token_count_delta": delta,
         "token_count_reduction_pct": reduction_pct,
-        "base_tokens": base_tokens,
-        "reference_tokens": reference_tokens,
-        "base_decoded_pieces": base_decoded_pieces,
-        "reference_decoded_pieces": reference_decoded_pieces,
+        "base_tokens": base_analysis["tokens"],
+        "reference_tokens": reference_analysis["tokens"],
+        "base_decoded_pieces": base_analysis["decoded_pieces"],
+        "reference_decoded_pieces": reference_analysis["decoded_pieces"],
     }
+
+    if extended_tokenizer is not None:
+        extended_analysis = analyze_tokenization(extended_tokenizer, text)
+        extended_count = extended_analysis["token_count"]
+        base_to_extended_delta = base_count - extended_count
+        base_to_extended_reduction_pct = (
+            0.0 if base_count == 0 else round((base_to_extended_delta / base_count) * 100, 2)
+        )
+        extended_to_reference_delta = extended_count - reference_count
+        extended_to_reference_reduction_pct = (
+            0.0 if extended_count == 0 else round((extended_to_reference_delta / extended_count) * 100, 2)
+        )
+
+        sample_report.update(
+            {
+                "extended_token_count": extended_count,
+                "extended_chars_per_token": chars_per_token(text, extended_count),
+                "extended_tokens": extended_analysis["tokens"],
+                "extended_decoded_pieces": extended_analysis["decoded_pieces"],
+                "base_to_extended_token_delta": base_to_extended_delta,
+                "base_to_extended_reduction_pct": base_to_extended_reduction_pct,
+                "extended_to_reference_token_delta": extended_to_reference_delta,
+                "extended_to_reference_reduction_pct": extended_to_reference_reduction_pct,
+            }
+        )
+
+    return sample_report
 
 
 def build_summary(comparisons: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -121,7 +158,7 @@ def build_summary(comparisons: List[Dict[str, Any]]) -> Dict[str, Any]:
     sample_count = len(comparisons)
     delta = total_base - total_reference
 
-    return {
+    summary = {
         "sample_count": sample_count,
         "total_base_tokens": total_base,
         "total_reference_tokens": total_reference,
@@ -133,24 +170,72 @@ def build_summary(comparisons: List[Dict[str, Any]]) -> Dict[str, Any]:
         "relative_reduction_pct": round((delta / total_base) * 100, 2) if total_base else 0.0,
     }
 
+    has_extended = bool(comparisons) and "extended_token_count" in comparisons[0]
+    if has_extended:
+        total_extended = sum(item["extended_token_count"] for item in comparisons)
+        base_to_extended_delta = total_base - total_extended
+        extended_to_reference_delta = total_extended - total_reference
+        summary.update(
+            {
+                "total_extended_tokens": total_extended,
+                "avg_extended_tokens_per_sample": round(total_extended / sample_count, 4)
+                if sample_count
+                else 0.0,
+                "base_to_extended_token_delta": base_to_extended_delta,
+                "base_to_extended_reduction_pct": round((base_to_extended_delta / total_base) * 100, 2)
+                if total_base
+                else 0.0,
+                "extended_to_reference_token_delta": extended_to_reference_delta,
+                "extended_to_reference_reduction_pct": round(
+                    (extended_to_reference_delta / total_extended) * 100,
+                    2,
+                )
+                if total_extended
+                else 0.0,
+            }
+        )
+
+    return summary
+
 
 def print_human_report(summary: Dict[str, Any], comparisons: List[Dict[str, Any]]) -> None:
     print("Tokenizer comparison summary")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
+    has_extended = bool(comparisons) and "extended_token_count" in comparisons[0]
+
     for index, item in enumerate(comparisons, start=1):
         print(f"\nSample {index}")
         print(f"Text: {item['text']}")
-        print(
-            "Base tokens: "
-            f"{item['base_token_count']} | Reference tokens: {item['reference_token_count']} | "
-            f"Delta: {item['token_count_delta']}"
-        )
-        print(
-            "Base chars/token: "
-            f"{item['base_chars_per_token']} | Reference chars/token: {item['reference_chars_per_token']}"
-        )
+        if has_extended:
+            print(
+                "Base tokens: "
+                f"{item['base_token_count']} | Extended tokens: {item['extended_token_count']} | "
+                f"Reference tokens: {item['reference_token_count']}"
+            )
+            print(
+                "Base chars/token: "
+                f"{item['base_chars_per_token']} | Extended chars/token: {item['extended_chars_per_token']} | "
+                f"Reference chars/token: {item['reference_chars_per_token']}"
+            )
+            print(
+                "Base -> Extended delta: "
+                f"{item['base_to_extended_token_delta']} | Base -> Reference delta: {item['token_count_delta']} | "
+                f"Extended -> Reference delta: {item['extended_to_reference_token_delta']}"
+            )
+        else:
+            print(
+                "Base tokens: "
+                f"{item['base_token_count']} | Reference tokens: {item['reference_token_count']} | "
+                f"Delta: {item['token_count_delta']}"
+            )
+            print(
+                "Base chars/token: "
+                f"{item['base_chars_per_token']} | Reference chars/token: {item['reference_chars_per_token']}"
+            )
         print(f"Base tokenization (Apertus): {item['base_decoded_pieces']}")
+        if has_extended:
+            print(f"Extended tokenization (Apertus Greek v1): {item['extended_decoded_pieces']}")
         print(f"Reference tokenization (KriKri): {item['reference_decoded_pieces']}")
 
 
@@ -164,12 +249,21 @@ def main() -> None:
         args.base_tokenizer,
         trust_remote_code=args.trust_remote_code,
     )
+    extended_tokenizer = None
+    if args.extended_tokenizer:
+        extended_tokenizer = AutoTokenizer.from_pretrained(
+            args.extended_tokenizer,
+            trust_remote_code=args.trust_remote_code,
+        )
     reference_tokenizer = AutoTokenizer.from_pretrained(
         args.reference_tokenizer,
         trust_remote_code=args.trust_remote_code,
     )
 
-    comparisons = [compare_sample(base_tokenizer, reference_tokenizer, sample) for sample in samples]
+    comparisons = [
+        compare_sample(base_tokenizer, reference_tokenizer, sample, extended_tokenizer=extended_tokenizer)
+        for sample in samples
+    ]
     summary = build_summary(comparisons)
 
     report = {
@@ -178,6 +272,8 @@ def main() -> None:
         "summary": summary,
         "samples": comparisons,
     }
+    if args.extended_tokenizer:
+        report["extended_tokenizer"] = args.extended_tokenizer
 
     if args.report_path is not None:
         args.report_path.parent.mkdir(parents=True, exist_ok=True)
