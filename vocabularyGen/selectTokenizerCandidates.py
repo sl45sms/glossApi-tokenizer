@@ -15,9 +15,7 @@ DEFAULT_BASE_TOKENIZER = "artifacts/tokenizers/apertus-base"
 DEFAULT_OUTPUT_TSV_PATH = Path("artifacts/vocab_candidates/fineweb2_hq_ell_grek_candidates.tsv")
 DEFAULT_OUTPUT_TOKENS_PATH = Path("artifacts/vocab_candidates/selected_tokens_v1.txt")
 DEFAULT_REPORT_PATH = Path("artifacts/reports/fineweb2_hq_ell_grek_candidate_selection.json")
-DEFAULT_SUFFIXES_PATH = Path("vocabularyGen/static/epithemata.txt")
-DEFAULT_PREFIXES_PATH = Path("vocabularyGen/static/prothimata.txt")
-DEFAULT_FORCED_WORDS_PATH = Path("vocabularyGen/static/forced.txt")
+DEFAULT_STATIC_DIR = Path("vocabularyGen/static")
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,27 +49,16 @@ def parse_args() -> argparse.Namespace:
         help="Base tokenizer path or Hugging Face model id to score against.",
     )
     parser.add_argument(
-        "--suffixes-path",
+        "--static-dir",
         type=Path,
-        default=DEFAULT_SUFFIXES_PATH,
-        help="Static suffix list to inject as missing tokenizer candidates. Hyphens are stripped before use.",
+        default=DEFAULT_STATIC_DIR,
+        help="Directory of static token files to append. Every non-empty line in every file is read; hyphens are removed.",
     )
     parser.add_argument(
-        "--prefixes-path",
-        type=Path,
-        default=DEFAULT_PREFIXES_PATH,
-        help="Static prefix list to inject as missing tokenizer candidates. Hyphens are stripped before use.",
-    )
-    parser.add_argument(
-        "--forced-words-path",
-        type=Path,
-        default=DEFAULT_FORCED_WORDS_PATH,
-        help="Static whole-word list to inject as missing tokenizer candidates. Entries are used as written.",
-    )
-    parser.add_argument(
+        "--skip-static-files",
         "--skip-static-affixes",
         action="store_true",
-        help="Disable prefix/suffix/forced-word injection from the static files.",
+        help="Disable extra token injection from files in the static directory.",
     )
     parser.add_argument(
         "--output-tsv-path",
@@ -189,12 +176,11 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--batch-size must be greater than 0.")
     if args.example_limit < 0:
         raise SystemExit("--example-limit cannot be negative.")
-    if not args.skip_static_affixes and not args.suffixes_path.exists():
-        raise SystemExit(f"Static suffix file not found: {args.suffixes_path}")
-    if not args.skip_static_affixes and not args.prefixes_path.exists():
-        raise SystemExit(f"Static prefix file not found: {args.prefixes_path}")
-    if not args.skip_static_affixes and not args.forced_words_path.exists():
-        raise SystemExit(f"Static forced-word file not found: {args.forced_words_path}")
+    if not args.skip_static_files:
+        if not args.static_dir.exists():
+            raise SystemExit(f"Static directory not found: {args.static_dir}")
+        if not args.static_dir.is_dir():
+            raise SystemExit(f"Static path is not a directory: {args.static_dir}")
 
 
 def ensure_parent_dir(path: Path) -> None:
@@ -363,91 +349,83 @@ def collapse_case_variants(
 
 
 def sanitize_static_entry(raw_entry: str, strip_hyphen: bool) -> str:
-    cleaned_entry = raw_entry.strip()
+    cleaned_entry = raw_entry
     if strip_hyphen:
         cleaned_entry = cleaned_entry.replace("-", "")
     return cleaned_entry
 
 
-def load_static_affix_groups(args: argparse.Namespace) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    if args.skip_static_affixes:
+def list_static_files(static_dir: Path) -> List[Path]:
+    return sorted(path for path in static_dir.iterdir() if path.is_file())
+
+
+def load_static_token_groups(args: argparse.Namespace) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    if args.skip_static_files:
         return [], {
             "enabled": False,
+            "file_count": 0,
             "raw_entry_count": 0,
             "cleaned_entry_count": 0,
             "group_count": 0,
-            "collapsed_group_count": 0,
+            "duplicate_exact_entry_count": 0,
+            "static_files": [],
         }
 
+    static_files = list_static_files(args.static_dir)
     raw_entries: List[Tuple[str, str, str]] = []
-    for path, affix_kind, strip_hyphen in (
-        (args.suffixes_path, "suffix", True),
-        (args.prefixes_path, "prefix", True),
-        (args.forced_words_path, "forced", False),
-    ):
+    for path in static_files:
         for line in path.read_text(encoding="utf-8").splitlines():
-            raw_entry = line.strip()
-            if not raw_entry:
+            raw_entry = line
+            if not raw_entry.strip():
                 continue
 
-            cleaned_entry = sanitize_static_entry(raw_entry, strip_hyphen=strip_hyphen)
+            cleaned_entry = sanitize_static_entry(raw_entry, strip_hyphen=True)
             if not cleaned_entry:
                 continue
 
-            raw_entries.append((cleaned_entry, raw_entry, affix_kind))
+            raw_entries.append((cleaned_entry, raw_entry, path.name))
 
     grouped_entries: DefaultDict[str, Dict[str, Any]] = defaultdict(
         lambda: {
-            "variant_counts": defaultdict(int),
+            "count": 0,
             "raw_entries": [],
-            "forced_variants": set(),
-            "kinds": set(),
+            "source_files": set(),
         }
     )
 
-    for cleaned_entry, raw_entry, affix_kind in raw_entries:
-        group_key = cleaned_entry if args.preserve_case_variants else cleaned_entry.casefold()
-        grouped_entry = grouped_entries[group_key]
-        grouped_entry["variant_counts"][cleaned_entry] += 1
+    for cleaned_entry, raw_entry, source_file in raw_entries:
+        grouped_entry = grouped_entries[cleaned_entry]
+        grouped_entry["count"] += 1
         grouped_entry["raw_entries"].append(raw_entry)
-        grouped_entry["kinds"].add(affix_kind)
-        if affix_kind == "forced":
-            grouped_entry["forced_variants"].add(cleaned_entry)
+        grouped_entry["source_files"].add(source_file)
 
-    collapsed_entries: List[Dict[str, Any]] = []
-    collapsed_group_count = 0
+    static_entries: List[Dict[str, Any]] = []
+    duplicate_exact_entry_count = 0
     for grouped_entry in grouped_entries.values():
-        representative_pool = grouped_entry["variant_counts"]
-        if grouped_entry["forced_variants"]:
-            representative_pool = {
-                variant: grouped_entry["variant_counts"][variant]
-                for variant in grouped_entry["forced_variants"]
-            }
-
-        representative = choose_case_variant_representative(representative_pool)
-        cleaned_variants = dict(
-            sorted(grouped_entry["variant_counts"].items(), key=lambda item: (-item[1], item[0]))
-        )
         raw_entry_list = sorted(set(grouped_entry["raw_entries"]))
-        if len(cleaned_variants) > 1:
-            collapsed_group_count += 1
+        if grouped_entry["count"] > 1:
+            duplicate_exact_entry_count += grouped_entry["count"] - 1
 
-        collapsed_entries.append(
+        representative = sanitize_static_entry(raw_entry_list[0], strip_hyphen=True)
+        static_entries.append(
             {
                 "word": representative,
-                "clean_variants": cleaned_variants,
+                "token": representative,
+                "clean_variants": {representative: grouped_entry["count"]},
                 "raw_entries": raw_entry_list,
-                "kinds": sorted(grouped_entry["kinds"]),
+                "source_files": sorted(grouped_entry["source_files"]),
             }
         )
 
-    collapsed_entries.sort(key=lambda item: item["word"])
-    return collapsed_entries, {
+    static_entries.sort(key=lambda item: item["word"])
+    return static_entries, {
         "enabled": True,
+        "file_count": len(static_files),
         "raw_entry_count": len(raw_entries),
         "cleaned_entry_count": len(raw_entries),
         "group_count": len(grouped_entries),
-        "collapsed_group_count": collapsed_group_count,
+        "duplicate_exact_entry_count": duplicate_exact_entry_count,
+        "static_files": [str(path) for path in static_files],
     }
 
 
@@ -498,9 +476,10 @@ def select_candidates(
             selected_candidates.append(
                 {
                     "word": word,
+                    "token": f" {word}",
                     "count": count,
                     "source_type": "corpus",
-                    "static_affix_kind": "",
+                    "static_source_files": "",
                     "source_variant_count": len(variant_details.get(word, {word: count})),
                     "source_variants": variant_details.get(word, {word: count}),
                     "base_token_count": base_token_count,
@@ -517,40 +496,41 @@ def select_candidates(
     return selected_candidates, stats
 
 
-def build_static_affix_candidates(
-    static_affix_groups: Sequence[Dict[str, Any]],
+def build_static_candidates(
+    static_token_groups: Sequence[Dict[str, Any]],
     base_tokenizer,
-    existing_words: Sequence[str],
+    existing_tokens: Sequence[str],
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    existing_word_set = set(existing_words)
+    existing_token_set = set(existing_tokens)
     stats: Dict[str, Any] = {
-        "input_group_count": len(static_affix_groups),
+        "input_group_count": len(static_token_groups),
         "already_present_in_base": 0,
-        "already_selected_by_corpus": 0,
-        "missing_affix_candidates": 0,
+        "already_selected_by_token": 0,
+        "missing_static_candidates": 0,
     }
     static_candidates: List[Dict[str, Any]] = []
 
-    for affix_group in static_affix_groups:
-        word = affix_group["word"]
+    for static_group in static_token_groups:
+        word = static_group["word"]
         exact_single_token, token_ids = has_exact_single_token_coverage(base_tokenizer, word)
         if exact_single_token:
             stats["already_present_in_base"] += 1
             continue
 
-        if word in existing_word_set:
-            stats["already_selected_by_corpus"] += 1
+        if word in existing_token_set:
+            stats["already_selected_by_token"] += 1
             continue
 
         static_candidates.append(
             {
                 "word": word,
+                "token": word,
                 "count": 0,
-                "source_type": "static_affix",
-                "static_affix_kind": ",".join(affix_group["kinds"]),
-                "source_variant_count": len(affix_group["raw_entries"]),
-                "source_variants": affix_group["clean_variants"],
-                "static_raw_entries": affix_group["raw_entries"],
+                "source_type": "static",
+                "static_source_files": ",".join(static_group["source_files"]),
+                "source_variant_count": len(static_group["raw_entries"]),
+                "source_variants": static_group["clean_variants"],
+                "static_raw_entries": static_group["raw_entries"],
                 "base_token_count": len(token_ids),
                 "base_fragmentation": max(len(token_ids) - 1, 0),
                 "utility_score": 0,
@@ -558,7 +538,7 @@ def build_static_affix_candidates(
         )
 
     static_candidates.sort(key=lambda candidate: (-candidate["base_token_count"], candidate["word"]))
-    stats["missing_affix_candidates"] = len(static_candidates)
+    stats["missing_static_candidates"] = len(static_candidates)
     return static_candidates, stats
 
 
@@ -589,9 +569,10 @@ def write_candidate_tsv(path: Path, selected_candidates: Sequence[Dict[str, Any]
         writer.writerow(
             [
                 "word",
+                "token",
                 "count",
                 "source_type",
-                "static_affix_kind",
+                "static_source_files",
                 "source_variant_count",
                 "base_token_count",
                 "base_fragmentation",
@@ -602,9 +583,10 @@ def write_candidate_tsv(path: Path, selected_candidates: Sequence[Dict[str, Any]
             writer.writerow(
                 [
                     candidate["word"],
+                    candidate["token"],
                     candidate["count"],
                     candidate["source_type"],
-                    candidate["static_affix_kind"],
+                    candidate["static_source_files"],
                     candidate["source_variant_count"],
                     candidate["base_token_count"],
                     candidate["base_fragmentation"],
@@ -615,7 +597,7 @@ def write_candidate_tsv(path: Path, selected_candidates: Sequence[Dict[str, Any]
 
 def write_token_list(path: Path, selected_candidates: Sequence[Dict[str, Any]]) -> None:
     path.write_text(
-        "\n".join(candidate["word"] for candidate in selected_candidates) + "\n",
+        "\n".join(candidate["token"] for candidate in selected_candidates) + "\n",
         encoding="utf-8",
     )
 
@@ -645,13 +627,13 @@ def main() -> None:
         variant_details,
     )
 
-    static_affix_groups, static_affix_input_stats = load_static_affix_groups(args)
-    static_affix_candidates, static_affix_stats = build_static_affix_candidates(
-        static_affix_groups,
+    static_token_groups, static_input_stats = load_static_token_groups(args)
+    static_candidates, static_stats = build_static_candidates(
+        static_token_groups,
         base_tokenizer,
-        [candidate["word"] for candidate in selected_candidates],
+        [candidate["token"] for candidate in selected_candidates],
     )
-    all_selected_candidates = selected_candidates + static_affix_candidates
+    all_selected_candidates = selected_candidates + static_candidates
 
     write_candidate_tsv(args.output_tsv_path, all_selected_candidates)
     write_token_list(args.output_tokens_path, all_selected_candidates)
@@ -673,19 +655,15 @@ def main() -> None:
             "include_non_greek": args.include_non_greek,
             "preserve_case_variants": args.preserve_case_variants,
             "min_base_token_count": args.min_base_token_count,
-            "skip_static_affixes": args.skip_static_affixes,
+            "skip_static_files": args.skip_static_files,
             "batch_size": args.batch_size,
         },
-        "static_paths": {
-            "suffixes_path": str(args.suffixes_path),
-            "prefixes_path": str(args.prefixes_path),
-            "forced_words_path": str(args.forced_words_path),
-        },
+        "static_dir": str(args.static_dir),
         "source_filter_stats": source_filter_stats,
         "case_variant_stats": case_variant_stats,
         "selection_stats": selection_stats,
-        "static_affix_input_stats": static_affix_input_stats,
-        "static_affix_stats": static_affix_stats,
+        "static_input_stats": static_input_stats,
+        "static_stats": static_stats,
         "outputs": {
             "output_tsv_path": str(args.output_tsv_path),
             "output_tokens_path": str(args.output_tokens_path),
@@ -696,8 +674,8 @@ def main() -> None:
             base_tokenizer,
             args.example_limit,
         ),
-        "selected_static_affix_examples": build_examples(
-            static_affix_candidates,
+        "selected_static_examples": build_examples(
+            static_candidates,
             base_tokenizer,
             args.example_limit,
         ),

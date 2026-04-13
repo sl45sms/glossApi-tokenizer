@@ -59,14 +59,6 @@ def parse_args() -> argparse.Namespace:
         help="Maximum number of example added/skipped tokens to include in the report.",
     )
     parser.add_argument(
-        "--skip-leading-space-variants",
-        action="store_true",
-        help=(
-            "Do not add a second candidate variant with a single leading space for tokens that do not already "
-            "contain whitespace."
-        ),
-    )
-    parser.add_argument(
         "--trust-remote-code",
         action="store_true",
         help="Pass trust_remote_code=True when loading the tokenizer.",
@@ -119,8 +111,8 @@ def load_candidate_tokens(token_file: Path) -> Tuple[List[str], Dict[str, int]]:
     unique_tokens: List[str] = []
 
     for line in token_file.read_text(encoding="utf-8").splitlines():
-        token = line.strip()
-        if not token:
+        token = line
+        if not token.strip():
             continue
 
         raw_tokens.append(token)
@@ -135,38 +127,6 @@ def load_candidate_tokens(token_file: Path) -> Tuple[List[str], Dict[str, int]]:
         "raw_non_empty_token_count": len(raw_tokens),
         "unique_input_token_count": len(unique_tokens),
         "duplicate_input_count": duplicate_input_count,
-    }
-
-
-def should_add_leading_space_variant(token: str) -> bool:
-    return bool(token) and token == token.strip() and not any(character.isspace() for character in token)
-
-
-def expand_candidate_tokens(tokens: Sequence[str], include_leading_space_variants: bool) -> Tuple[List[str], Dict[str, int]]:
-    expanded_tokens: List[str] = []
-    seen = set()
-    duplicate_expanded_variant_count = 0
-    leading_space_variant_count = 0
-
-    for token in tokens:
-        variants = [token]
-        if include_leading_space_variants and should_add_leading_space_variant(token):
-            variants.append(f" {token}")
-
-        for variant in variants:
-            if variant in seen:
-                duplicate_expanded_variant_count += 1
-                continue
-
-            seen.add(variant)
-            expanded_tokens.append(variant)
-            if variant.startswith(" "):
-                leading_space_variant_count += 1
-
-    return expanded_tokens, {
-        "expanded_input_token_count": len(expanded_tokens),
-        "leading_space_variant_count": leading_space_variant_count,
-        "duplicate_expanded_variant_count": duplicate_expanded_variant_count,
     }
 
 
@@ -240,8 +200,8 @@ def build_report(
         "tokenizer_class": tokenizer.__class__.__name__,
         "special_tokens_map": tokenizer.special_tokens_map,
         "is_fast": bool(getattr(tokenizer, "is_fast", False)),
-        "variant_strategy": {
-            "include_leading_space_variants": not args.skip_leading_space_variants,
+        "token_file_strategy": {
+            "use_input_tokens_verbatim": True,
         },
         "samples": {
             "added_tokens": list(tokens_to_add[: args.sample_limit]),
@@ -262,13 +222,7 @@ def main() -> None:
     )
 
     unique_tokens, token_input_stats = load_candidate_tokens(args.token_file)
-    expanded_tokens, expansion_stats = expand_candidate_tokens(
-        unique_tokens,
-        include_leading_space_variants=not args.skip_leading_space_variants,
-    )
-    token_input_stats.update(expansion_stats)
-
-    tokens_to_add, skipped_tokens = partition_tokens(tokenizer, expanded_tokens)
+    tokens_to_add, skipped_tokens = partition_tokens(tokenizer, unique_tokens)
 
     num_added = tokenizer.add_tokens(tokens_to_add)
     tokenizer.save_pretrained(args.output_dir)
