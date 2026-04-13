@@ -35,3 +35,45 @@ Useful options:
 - `--reuse-db` skips dataset processing and re-exports JSON from an existing SQLite database.
 
 This is a CPU-side preprocessing step and fits the Clariden `uenv` workflow described in the repository runbook.
+
+After generating the counts, you can rank real observed words into tokenizer candidates:
+
+```bash
+./run_uenv.sh python vocabularyGen/selectTokenizerCandidates.py \
+  --min-count 5 \
+  --min-base-token-count 3 \
+  --max-selected 5000 \
+  --overwrite
+```
+
+That selector writes:
+
+- `artifacts/vocab_candidates/fineweb2_hq_ell_grek_candidates.tsv`
+- `artifacts/vocab_candidates/selected_tokens_v1.txt`
+- `artifacts/reports/fineweb2_hq_ell_grek_candidate_selection.json`
+
+The selector uses only the base Apertus tokenizer. By default it keeps words that the base tokenizer splits into 3 or more tokens, then ranks them by real corpus frequency and base-tokenizer fragmentation. It does not generate artificial stems as tokens.
+Case variants are collapsed by default, so entries like `Δημιουργία` and `δημιουργία` become a single candidate and the lowercase form is preferred when it exists.
+It also reads `vocabularyGen/static/epithemata.txt`, `vocabularyGen/static/prothimata.txt`, and `vocabularyGen/static/forced.txt` by default. Hyphens are stripped from the prefix/suffix lists, while `forced.txt` entries are used as written, and any missing entries are appended when the base tokenizer does not already contain them as an exact single token.
+
+Useful selector options:
+
+- `--top-k-input 200000` only scores the top 200k counted words.
+- `--min-base-token-count 3` keeps only words that currently split into at least 3 base-tokenizer pieces.
+- `--min-base-token-count 4` is a stricter pass if you want only heavily fragmented words.
+- `--preserve-case-variants` keeps uppercase and lowercase variants as separate candidates if you explicitly want that.
+- `--skip-static-affixes` disables the extra prefix/suffix injection step.
+- `--max-selected 2000` gives you a smaller, more conservative first token list.
+
+To turn the selected token list into a saved tokenizer directory, run:
+
+```bash
+./run_uenv.sh python scripts/extend_apertus_tokenizer.py \
+  --overwrite
+```
+
+That writes:
+
+- `artifacts/tokenizers/apertus-greek-v1`
+- `artifacts/tokenizers/apertus-greek-v1/tokenizer_readable.json`
+- `artifacts/reports/tokenizer_apertus_greek_v1.json`
