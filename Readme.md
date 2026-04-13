@@ -151,6 +151,54 @@ Start the local web UI on `http://localhost:7860/`:
 
 The UI sends each non-empty line of input text to `scripts/compare_tokenizers.py` and displays the summary, per-sample tokenization, and raw JSON report.
 
+### 6. Count Greek words and rank tokenizer candidates
+
+After extracting tokenizers, you can mine frequent Greek words from FineWeb2-HQ and turn them into a ranked candidate token list.
+
+First, count words from the Greek `ell_Grek` split:
+
+```bash
+./run_uenv.sh python vocabularyGen/countWords.py \
+  --min-count 5 \
+  --report-every 10000 \
+  --overwrite
+```
+
+Then rank candidate tokens against the saved Apertus tokenizer:
+
+```bash
+./run_uenv.sh python vocabularyGen/selectTokenizerCandidates.py \
+  --min-count 5 \
+  --min-base-token-count 3 \
+  --max-selected 5000 \
+  --overwrite
+```
+
+This produces:
+
+- `artifacts/vocab_candidates/fineweb2_hq_ell_grek_candidates.tsv`
+- `artifacts/vocab_candidates/selected_tokens_v1.txt`
+- `artifacts/reports/fineweb2_hq_ell_grek_candidate_selection.json`
+
+The selector uses only the base Apertus tokenizer. By default it keeps words that currently require at least 3 base tokens, ranks them by frequency and base-tokenizer fragmentation, collapses case variants so lowercase forms are preferred over duplicate capitalized forms, and appends cleaned affixes from `vocabularyGen/static/epithemata.txt` and `vocabularyGen/static/prothimata.txt` when those affixes are missing as exact single tokens in the base tokenizer.
+
+### 7. Build the extended Apertus tokenizer
+
+After reviewing `artifacts/vocab_candidates/selected_tokens_v1.txt`, create the extended tokenizer directory:
+
+```bash
+./run_uenv.sh python scripts/extend_apertus_tokenizer.py \
+  --overwrite
+```
+
+This writes:
+
+- `artifacts/tokenizers/apertus-greek-v1`
+- `artifacts/tokenizers/apertus-greek-v1/tokenizer_readable.json`
+- `artifacts/reports/tokenizer_apertus_greek_v1.json`
+
+The script reads the selected token list, skips entries that already exist in the base tokenizer as exact single tokens, adds the rest in file order, saves the new tokenizer, and writes a report with added/skipped counts and sample tokens.
+
 ## Notes
 
 - `--trust-remote-code` is included because some model repositories require it when loading tokenizers.
@@ -165,4 +213,6 @@ The UI sends each non-empty line of input text to `scripts/compare_tokenizers.py
 - `visualizer/app.py` provides a local Gradio UI on `http://localhost:7860/` and shells out to `scripts/compare_tokenizers.py` for the actual comparison.
 - Many modern tokenizers use an internal byte-level representation, so raw vocabulary entries can look like mojibake such as `ÏĦÎ¹ÎºÎ¬`. The comparison script prints decoded token pieces for readability, and `tokenizer_readable.json` applies the same idea to the saved tokenizer export where it is safe to do so.
 - Hugging Face downloads worked without authentication here, but the CLI warns that setting `HF_TOKEN` is recommended for better rate limits.
-- The next step after these scripts is candidate mining from GlossAPI text so token additions are based on measured Greek coverage gaps.
+- `vocabularyGen/countWords.py` streams the FineWeb2-HQ Greek split through `uenv`, keeps exact counts in SQLite during the run, and exports a JSON frequency list.
+- `vocabularyGen/selectTokenizerCandidates.py` turns those counts into a ranked token candidate list using only the base tokenizer, with a configurable minimum base token count that defaults to 3.
+- `scripts/extend_apertus_tokenizer.py` consumes `artifacts/vocab_candidates/selected_tokens_v1.txt` and writes the extended tokenizer under `artifacts/tokenizers/apertus-greek-v1`.
