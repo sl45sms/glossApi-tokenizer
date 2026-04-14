@@ -1,22 +1,5 @@
-Use this script to stream the Greek `ell_Grek` subset of `epfml/FineWeb2-HQ`, count word frequencies, and export a JSON list sorted by descending count.
+Use the scripts `countWords` and `countQuotedWords` to stream the Greek `ell_Grek` subset of `epfml/FineWeb2-HQ`, count word frequencies, and export a JSON list sorted by descending count.
 
-The main output file is:
-
-```json
-[
-  {"word": "xxx", "count": 123},
-  {"word": "zzz", "count": 67},
-  {"word": "yyy", "count": 45}
-]
-```
-
-The default output locations are:
-
-- `artifacts/vocab_candidates/fineweb2_hq_ell_grek_word_counts.json`
-- `artifacts/reports/fineweb2_hq_ell_grek_word_count_summary.json`
-- `artifacts/vocab_candidates/fineweb2_hq_ell_grek_word_counts.sqlite3`
-
-The SQLite file is intentional. The Greek FineWeb2-HQ split is about 84GB, so keeping exact counts only in memory is not reliable. The script streams the dataset and flushes batched counts to SQLite, then exports the final sorted JSON from that database.
 
 Run it through `uenv` like the other repo scripts:
 
@@ -35,6 +18,32 @@ Useful options:
 - `--reuse-db` skips dataset processing and re-exports JSON from an existing SQLite database.
 
 This is a CPU-side preprocessing step and fits the Clariden `uenv` workflow described in the repository runbook.
+
+The default output locations are:
+
+- `artifacts/vocab_candidates/fineweb2_hq_ell_grek_word_counts.json`
+- `artifacts/reports/fineweb2_hq_ell_grek_word_count_summary.json`
+- `artifacts/vocab_candidates/fineweb2_hq_ell_grek_word_counts.sqlite3`
+
+
+To extract words that appear inside quoted spans and write the most common ones into the static token folder, run:
+
+```bash
+./run_uenv.sh python vocabularyGen/countQuotedWords.py \
+  --overwrite
+```
+
+That writes:
+
+- `vocabularyGen/static/quoted_words.txt`
+- `artifacts/reports/fineweb2_hq_ell_grek_quoted_word_count_summary.json`
+- `artifacts/vocab_candidates/fineweb2_hq_ell_grek_quoted_word_counts.sqlite3`
+
+By default it exports the top 1000 quoted words. Use `--top-k 2000` for a larger static file or `--top-k 0` to export every quoted word above `--min-count`.
+It extracts words from text enclosed by single quotes, double quotes, or backticks, and it also normalizes common curly quote variants such as `“...”` and `«...»` before matching.
+
+
+* The SQLite files are intentional. The Greek FineWeb2-HQ split is about 84GB, so keeping exact counts only in memory is not reliable. The script streams the dataset and flushes batched counts to SQLite, then exports the final sorted JSON from that database.
 
 After generating the counts, you can rank real observed words into tokenizer candidates:
 
@@ -66,6 +75,8 @@ Useful selector options:
 - `--skip-static-files` disables the extra static token injection step.
 - `--max-selected 2000` gives you a smaller, more conservative first token list.
 
+
+
 To turn the selected token list into a saved tokenizer directory, run:
 
 ```bash
@@ -93,19 +104,3 @@ If you also want a model checkpoint with resized embeddings initialized from the
 
 In that mode, the script computes each new token's initialization from the base tokenizer decomposition before the token is added, averages the corresponding input embeddings, and applies the same mean initialization to the LM head when it is not tied to the input embedding matrix.
 The checkpoint path flags `--model-output-dir`, `--checkpoint-output-dir`, and `--checkpoint-storage-path` are aliases for the same setting. When `SCRATCH` is defined, the default checkpoint location is `$SCRATCH/apertus-greek-init`.
-
-To extract words that appear inside quoted spans and write the most common ones into the static token folder, run:
-
-```bash
-./run_uenv.sh python vocabularyGen/countQuotedWords.py \
-  --overwrite
-```
-
-That writes:
-
-- `vocabularyGen/static/quoted_words.txt`
-- `artifacts/reports/fineweb2_hq_ell_grek_quoted_word_count_summary.json`
-- `artifacts/vocab_candidates/fineweb2_hq_ell_grek_quoted_word_counts.sqlite3`
-
-By default it exports the top 1000 quoted words. Use `--top-k 2000` for a larger static file or `--top-k 0` to export every quoted word above `--min-count`.
-It extracts words from text enclosed by single quotes, double quotes, or backticks, and it also normalizes common curly quote variants such as `“...”` and `«...»` before matching.
