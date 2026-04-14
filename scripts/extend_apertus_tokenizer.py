@@ -136,6 +136,15 @@ def has_exact_single_token_coverage(tokenizer, token: str) -> Tuple[bool, List[i
     return len(token_ids) == 1 and decoded == token, token_ids
 
 
+def has_leading_space_shadow_conflict(tokenizer, token: str) -> Tuple[bool, str, List[int]]:
+    if not token or token[0].isspace():
+        return False, "", []
+
+    leading_space_token = f" {token}"
+    exact_single_token, token_ids = has_exact_single_token_coverage(tokenizer, leading_space_token)
+    return exact_single_token, leading_space_token, token_ids
+
+
 def partition_tokens(tokenizer, tokens: Sequence[str]) -> Tuple[List[str], List[Dict[str, Any]]]:
     tokens_to_add: List[str] = []
     skipped_tokens: List[Dict[str, Any]] = []
@@ -148,6 +157,21 @@ def partition_tokens(tokenizer, tokens: Sequence[str]) -> Tuple[List[str], List[
                     "token": token,
                     "reason": "already_present_as_exact_single_token",
                     "existing_token_id": token_ids[0],
+                }
+            )
+            continue
+
+        has_shadow_conflict, leading_space_token, leading_space_token_ids = has_leading_space_shadow_conflict(
+            tokenizer,
+            token,
+        )
+        if has_shadow_conflict:
+            skipped_tokens.append(
+                {
+                    "token": token,
+                    "reason": "would_shadow_existing_leading_space_single_token",
+                    "conflicting_token": leading_space_token,
+                    "conflicting_token_id": leading_space_token_ids[0],
                 }
             )
             continue
