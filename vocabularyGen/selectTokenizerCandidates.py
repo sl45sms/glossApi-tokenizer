@@ -504,7 +504,7 @@ def build_static_candidates(
     existing_token_set = set(existing_tokens)
     stats: Dict[str, Any] = {
         "input_group_count": len(static_token_groups),
-        "already_present_in_base": 0,
+        "exact_single_token_in_base": 0,
         "already_selected_by_token": 0,
         "missing_static_candidates": 0,
     }
@@ -514,8 +514,7 @@ def build_static_candidates(
         word = static_group["word"]
         exact_single_token, token_ids = has_exact_single_token_coverage(base_tokenizer, word)
         if exact_single_token:
-            stats["already_present_in_base"] += 1
-            continue
+            stats["exact_single_token_in_base"] += 1
 
         if word in existing_token_set:
             stats["already_selected_by_token"] += 1

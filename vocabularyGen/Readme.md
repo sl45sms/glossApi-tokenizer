@@ -55,7 +55,7 @@ That selector writes:
 The selector uses only the base Apertus tokenizer. By default it keeps words that the base tokenizer splits into 3 or more tokens, then ranks them by real corpus frequency and base-tokenizer fragmentation. It does not generate artificial stems as tokens.
 Case variants are collapsed by default, so entries like `Δημιουργία` and `δημιουργία` become a single candidate and the lowercase form is preferred when it exists.
 Corpus-selected tokens are written to `selected_tokens_v1.txt` with a single leading space so they match normal in-text word boundaries for this tokenizer family.
-The selector also reads every file in `vocabularyGen/static/` by default. Each non-empty line is treated as a static token candidate, hyphens are removed from the line, and the cleaned static token is appended exactly as written when the base tokenizer does not already contain it as an exact single token.
+The selector also reads every file in `vocabularyGen/static/` by default. Each non-empty line is treated as a static token candidate, hyphens are removed from the line, and the cleaned static token is appended to `selected_tokens_v1.txt` exactly as written, even if the base tokenizer already contains it as an exact single token.
 
 Useful selector options:
 
