@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
@@ -14,6 +15,13 @@ DEFAULT_TOKEN_FILE = Path("artifacts/vocab_candidates/selected_tokens_v1.txt")
 DEFAULT_OUTPUT_DIR = Path("artifacts/tokenizers/apertus-greek-v1")
 DEFAULT_REPORT_PATH = Path("artifacts/reports/tokenizer_apertus_greek_v1.json")
 DEFAULT_READABLE_TOKENIZER_PATH = Path("artifacts/tokenizers/apertus-greek-v1/tokenizer_readable.json")
+
+
+def default_model_output_dir() -> Path:
+    scratch_root = os.environ.get("SCRATCH")
+    if scratch_root:
+        return Path(scratch_root) / "apertus-greek-init"
+    return Path("artifacts/checkpoints/apertus-greek-init")
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,6 +49,25 @@ def parse_args() -> argparse.Namespace:
         help="Directory where the extended tokenizer will be saved.",
     )
     parser.add_argument(
+        "--base-model",
+        help=(
+            "Optional local model path or Hugging Face model id for a causal LM to resize and initialize from "
+            "the base tokenizer's original subtoken embeddings."
+        ),
+    )
+    parser.add_argument(
+        "--model-output-dir",
+        "--checkpoint-output-dir",
+        "--checkpoint-storage-path",
+        type=Path,
+        default=default_model_output_dir(),
+        help=(
+            "Directory where the resized and mean-initialized model checkpoint will be saved when --base-model "
+            "is provided. Defaults to $SCRATCH/apertus-greek-init when SCRATCH is set, otherwise "
+            "artifacts/checkpoints/apertus-greek-init."
+        ),
+    )
+    parser.add_argument(
         "--report-path",
         type=Path,
         default=DEFAULT_REPORT_PATH,
@@ -64,6 +91,12 @@ def parse_args() -> argparse.Namespace:
         help="Pass trust_remote_code=True when loading the tokenizer.",
     )
     parser.add_argument(
+        "--torch-dtype",
+        choices=("auto", "float32", "float16", "bfloat16"),
+        default="auto",
+        help="Torch dtype to use when loading --base-model.",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Replace an existing output directory or report files.",
@@ -81,20 +114,36 @@ def validate_args(args: argparse.Namespace) -> None:
     if base_tokenizer_path.exists() and base_tokenizer_path.resolve() == args.output_dir.resolve():
         raise SystemExit("--output-dir must not be the same path as the local --base-tokenizer directory.")
 
+    if args.base_model:
+        base_model_path = Path(args.base_model)
+        if base_model_path.exists():
+            if base_model_path.resolve() == args.output_dir.resolve():
+                raise SystemExit("--output-dir must not be the same path as the local --base-model directory.")
+            if base_model_path.resolve() == args.model_output_dir.resolve():
+                raise SystemExit("--model-output-dir must not be the same path as the local --base-model directory.")
+
 
 def ensure_parent_dir(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
 def prepare_output_paths(args: argparse.Namespace) -> None:
+    ensure_parent_dir(args.output_dir)
     ensure_parent_dir(args.report_path)
     ensure_parent_dir(args.readable_tokenizer_path)
+    if args.base_model:
+        ensure_parent_dir(args.model_output_dir)
 
-    if args.output_dir.exists():
-        if args.overwrite:
-            shutil.rmtree(args.output_dir)
-        else:
-            raise SystemExit(f"Refusing to overwrite existing directory: {args.output_dir}. Use --overwrite.")
+    output_directories = {args.output_dir.resolve(): args.output_dir}
+    if args.base_model:
+        output_directories[args.model_output_dir.resolve()] = args.model_output_dir
+
+    for directory in output_directories.values():
+        if directory.exists():
+            if args.overwrite:
+                shutil.rmtree(directory)
+            else:
+                raise SystemExit(f"Refusing to overwrite existing directory: {directory}. Use --overwrite.")
 
     for path in (args.report_path, args.readable_tokenizer_path):
         if path.exists():
@@ -145,9 +194,13 @@ def has_leading_space_shadow_conflict(tokenizer, token: str) -> Tuple[bool, str,
     return exact_single_token, leading_space_token, token_ids
 
 
-def partition_tokens(tokenizer, tokens: Sequence[str]) -> Tuple[List[str], List[Dict[str, Any]]]:
+def partition_tokens(
+    tokenizer,
+    tokens: Sequence[str],
+) -> Tuple[List[str], List[Dict[str, Any]], Dict[str, List[int]]]:
     tokens_to_add: List[str] = []
     skipped_tokens: List[Dict[str, Any]] = []
+    initialization_source_ids: Dict[str, List[int]] = {}
 
     for token in tokens:
         exact_single_token, token_ids = has_exact_single_token_coverage(tokenizer, token)
@@ -177,8 +230,104 @@ def partition_tokens(tokenizer, tokens: Sequence[str]) -> Tuple[List[str], List[
             continue
 
         tokens_to_add.append(token)
+        initialization_source_ids[token] = list(token_ids)
 
-    return tokens_to_add, skipped_tokens
+    return tokens_to_add, skipped_tokens, initialization_source_ids
+
+
+def resolve_torch_dtype(torch_dtype_name: str):
+    if torch_dtype_name == "auto":
+        return "auto"
+
+    import torch
+
+    return getattr(torch, torch_dtype_name)
+
+
+def build_initialization_samples(
+    tokenizer,
+    initialization_source_ids: Dict[str, List[int]],
+    limit: int,
+) -> List[Dict[str, Any]]:
+    samples: List[Dict[str, Any]] = []
+    for token, source_ids in list(initialization_source_ids.items())[:limit]:
+        samples.append(
+            {
+                "token": token,
+                "source_token_count": len(source_ids),
+                "source_token_ids": list(source_ids),
+                "source_decoded_pieces": [
+                    tokenizer.decode([token_id], clean_up_tokenization_spaces=False) for token_id in source_ids
+                ],
+            }
+        )
+    return samples
+
+
+def initialize_model_embeddings(
+    args: argparse.Namespace,
+    tokenizer,
+    tokens_to_add: Sequence[str],
+    initialization_source_ids: Dict[str, List[int]],
+) -> Dict[str, Any]:
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    torch_dtype = resolve_torch_dtype(args.torch_dtype)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.base_model,
+        trust_remote_code=args.trust_remote_code,
+        dtype=torch_dtype,
+    )
+
+    model.resize_token_embeddings(len(tokenizer), mean_resizing=False)
+
+    input_embeddings = model.get_input_embeddings().weight
+    output_embedding_layer = model.get_output_embeddings()
+    output_embeddings = output_embedding_layer.weight if output_embedding_layer is not None else None
+    output_embeddings_share_storage = bool(
+        output_embeddings is not None and output_embeddings.data_ptr() == input_embeddings.data_ptr()
+    )
+
+    initialized_input_count = 0
+    initialized_output_count = 0
+    source_length_histogram: Dict[str, int] = {}
+
+    with torch.no_grad():
+        for token in tokens_to_add:
+            source_ids = initialization_source_ids.get(token, [])
+            if not source_ids:
+                continue
+
+            new_token_id = tokenizer.convert_tokens_to_ids(token)
+            input_embeddings[new_token_id].copy_(input_embeddings[source_ids].mean(dim=0))
+            initialized_input_count += 1
+
+            if output_embeddings is not None and not output_embeddings_share_storage:
+                output_embeddings[new_token_id].copy_(output_embeddings[source_ids].mean(dim=0))
+                initialized_output_count += 1
+            elif output_embeddings is not None:
+                initialized_output_count += 1
+
+            histogram_key = str(len(source_ids))
+            source_length_histogram[histogram_key] = source_length_histogram.get(histogram_key, 0) + 1
+
+    model.save_pretrained(args.model_output_dir)
+    if args.model_output_dir.resolve() != args.output_dir.resolve():
+        tokenizer.save_pretrained(args.model_output_dir)
+
+    return {
+        "enabled": True,
+        "base_model": args.base_model,
+        "model_output_dir": str(args.model_output_dir),
+        "torch_dtype": args.torch_dtype,
+        "initialized_input_embeddings": initialized_input_count,
+        "initialized_output_embeddings": initialized_output_count,
+        "output_embeddings_share_storage": output_embeddings_share_storage,
+        "source_subtoken_count_histogram": source_length_histogram,
+        "tokenizer_saved_with_model": True,
+        "samples": build_initialization_samples(tokenizer, initialization_source_ids, args.sample_limit),
+    }
 
 
 def write_readable_export(tokenizer, output_dir: Path, readable_tokenizer_path: Path) -> Dict[str, Any]:
@@ -207,6 +356,7 @@ def build_report(
     tokens_to_add: Sequence[str],
     num_added: int,
     readable_export_info: Dict[str, Any],
+    model_initialization_info: Dict[str, Any],
 ) -> Dict[str, Any]:
     initial_vocab_size = len(tokenizer) - num_added
     final_vocab_size = len(tokenizer)
@@ -231,6 +381,7 @@ def build_report(
             "added_tokens": list(tokens_to_add[: args.sample_limit]),
             "skipped_tokens": list(skipped_tokens[: args.sample_limit]),
         },
+        "model_initialization": model_initialization_info,
         **readable_export_info,
     }
 
@@ -246,10 +397,23 @@ def main() -> None:
     )
 
     unique_tokens, token_input_stats = load_candidate_tokens(args.token_file)
-    tokens_to_add, skipped_tokens = partition_tokens(tokenizer, unique_tokens)
+    tokens_to_add, skipped_tokens, initialization_source_ids = partition_tokens(tokenizer, unique_tokens)
 
     num_added = tokenizer.add_tokens(tokens_to_add)
     tokenizer.save_pretrained(args.output_dir)
+
+    if args.base_model:
+        model_initialization_info = initialize_model_embeddings(
+            args,
+            tokenizer,
+            tokens_to_add,
+            initialization_source_ids,
+        )
+    else:
+        model_initialization_info = {
+            "enabled": False,
+            "reason": "no_base_model_provided",
+        }
 
     readable_export_info = write_readable_export(tokenizer, args.output_dir, args.readable_tokenizer_path)
     report = build_report(
@@ -260,6 +424,7 @@ def main() -> None:
         tokens_to_add,
         num_added,
         readable_export_info,
+        model_initialization_info,
     )
 
     args.report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

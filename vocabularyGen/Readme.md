@@ -81,6 +81,19 @@ That writes:
 
 The extension script now uses the token list verbatim. It does not create extra with-space and without-space variants automatically, so the spacing behavior is controlled entirely by what `selectTokenizerCandidates.py` writes.
 
+If you also want a model checkpoint with resized embeddings initialized from the mean of the original subtoken embeddings, pass a base model path or model id:
+
+```bash
+./run_uenv.sh python scripts/extend_apertus_tokenizer.py \
+  --base-model swiss-ai/Apertus-8B-Instruct-2509 \
+  --checkpoint-output-dir /iopsstor/scratch/cscs/p-skarvelis/apertus-greek-init \
+  --torch-dtype bfloat16 \
+  --overwrite
+```
+
+In that mode, the script computes each new token's initialization from the base tokenizer decomposition before the token is added, averages the corresponding input embeddings, and applies the same mean initialization to the LM head when it is not tied to the input embedding matrix.
+The checkpoint path flags `--model-output-dir`, `--checkpoint-output-dir`, and `--checkpoint-storage-path` are aliases for the same setting. When `SCRATCH` is defined, the default checkpoint location is `$SCRATCH/apertus-greek-init`.
+
 To extract words that appear inside quoted spans and write the most common ones into the static token folder, run:
 
 ```bash
