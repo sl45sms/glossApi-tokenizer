@@ -129,15 +129,23 @@ export SMOKE_TEST=0
 sbatch --time=12:00:00 scripts/run_apertus_greek_cpt_clariden.sh
 ```
 
+The tracked launcher now uses conservative non-smoke defaults for the first real 2048-token run:
+
+- `MAX_SEQ_LENGTH=2048`
+- `PER_DEVICE_TRAIN_BATCH_SIZE=1`
+- `GRADIENT_ACCUMULATION_STEPS=64`
+
+That preserves the intended effective global batch of `256` across 4 GPUs while avoiding the previously observed OOM-prone `16 x 4` microbatch shape. Only raise the per-device batch size after a short 2048-token probe confirms memory headroom.
+
 Useful overrides for the launcher:
 
 - `sbatch --time=HH:MM:SS scripts/run_apertus_greek_cpt_clariden.sh`
 - `FULL_MAX_STEPS=50000`
 - `WARMUP_MAX_STEPS=2000`
 - `FULL_WARMUP_STEPS=1000`
-- `PER_DEVICE_TRAIN_BATCH_SIZE=16`
-- `GRADIENT_ACCUMULATION_STEPS=4`
-- `SMOKE_PER_DEVICE_TRAIN_BATCH_SIZE=2`
+- `PER_DEVICE_TRAIN_BATCH_SIZE=1`
+- `GRADIENT_ACCUMULATION_STEPS=64`
+- `SMOKE_PER_DEVICE_TRAIN_BATCH_SIZE=1`
 - `SMOKE_GRADIENT_ACCUMULATION_STEPS=1`
 - `SMOKE_MAX_SEQ_LENGTH=1024`
 - `ATTN_IMPLEMENTATION=sdpa`
