@@ -16,6 +16,19 @@ if [[ ! -d "${REPO_ROOT}" ]]; then
 	exit 1
 fi
 
+ENV_FILE="${REPO_ROOT}/.env"
+if [[ -f "${ENV_FILE}" ]]; then
+	set -a
+	# shellcheck disable=SC1090
+	source "${ENV_FILE}"
+	set +a
+	echo "Loaded optional environment from ${ENV_FILE}" >&2
+fi
+
+# Pyxis EDF expansion fails on undefined variables, so export an empty token when
+# the repo .env file is absent or does not define HF_TOKEN.
+export HF_TOKEN="${HF_TOKEN:-}"
+
 if [[ -z "${SCRATCH:-}" ]]; then
 	echo "SCRATCH must be set before submitting this job." >&2
 	exit 1
