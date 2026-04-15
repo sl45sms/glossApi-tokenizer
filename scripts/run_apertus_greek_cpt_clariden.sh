@@ -29,6 +29,8 @@ fi
 # the repo .env file is absent or does not define HF_TOKEN.
 export HF_TOKEN="${HF_TOKEN:-}"
 
+EDF_PATH="${HOME}/.edf/${CE_ENVIRONMENT:-apertus-greek-clariden}.toml"
+
 if [[ -z "${SCRATCH:-}" ]]; then
 	echo "SCRATCH must be set before submitting this job." >&2
 	exit 1
@@ -43,7 +45,7 @@ STAGE_ROOT="${STAGE_ROOT:-${SCRATCH}/glossapi-tokenizer_${SLURM_JOB_ID}}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
 EXPECTED_WORLD_SIZE="${EXPECTED_WORLD_SIZE:-${NPROC_PER_NODE}}"
 TORCH_DTYPE="${TORCH_DTYPE:-bfloat16}"
-ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-flash_attention_2}"
+ATTN_IMPLEMENTATION="${ATTN_IMPLEMENTATION:-sdpa}"
 BF16="${BF16:-1}"
 GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-1}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-0}"
@@ -83,6 +85,23 @@ ENGLISH_PROBABILITY="${ENGLISH_PROBABILITY:-0.1}"
 
 export OCI_ANNOTATION_com__hooks__cxi__enabled=false
 export SLURM_NETWORK=disable_rdzv_get
+
+if [[ -f "${EDF_PATH}" ]]; then
+	image_line="$(grep -E '^[[:space:]]*image[[:space:]]*=' "${EDF_PATH}" | head -n 1 || true)"
+	if [[ -n "${image_line}" ]]; then
+		image_expr="${image_line#*=}"
+		image_expr="${image_expr# }"
+		image_expr="${image_expr%\"}"
+		image_expr="${image_expr#\"}"
+		expanded_image="${image_expr}"
+		eval "expanded_image=\"${expanded_image}\""
+		if [[ "${expanded_image}" == *.sqsh && ! -f "${expanded_image}" ]]; then
+			echo "CE image referenced by ${EDF_PATH} does not exist: ${expanded_image}" >&2
+			echo "Build it first with: sbatch scripts/build_apertus_greek_clariden_image.sh" >&2
+			exit 1
+		fi
+	fi
+fi
 
 rm -rf "${STAGE_ROOT}"
 mkdir -p "${STAGE_ROOT}"
@@ -141,10 +160,16 @@ srun --environment="${CE_ENVIRONMENT}" \
 	--ntasks=1 bash <<'INNER'
 set -euo pipefail
 
+if [[ -f /opt/apertus-greek-venv/bin/activate ]]; then
+	. /opt/apertus-greek-venv/bin/activate
+elif [[ -f /opt/gsdg-venv/bin/activate ]]; then
+	. /opt/gsdg-venv/bin/activate
+fi
+
 export HF_HOME="${SCRATCH}/hf"
-export TRANSFORMERS_CACHE="${SCRATCH}/hf"
 export HF_DATASETS_CACHE="${SCRATCH}/hf_datasets"
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 
 mkdir -p "${HF_HOME}" "${HF_DATASETS_CACHE}" "$(dirname "${OUTPUT_DIR}")"
 cd "${STAGE_ROOT}"
