@@ -129,6 +129,31 @@ export SMOKE_TEST=0
 sbatch --time=12:00:00 scripts/run_apertus_greek_cpt_clariden.sh
 ```
 
+Multi-node production example on 4 Clariden nodes / 16 GPUs:
+
+```bash
+export CE_ENVIRONMENT=apertus-greek-clariden
+export MODEL_PATH=${SCRATCH}/apertus-greek-init
+export OUTPUT_DIR=${SCRATCH}/apertus-greek-cpt-multinode
+export SMOKE_TEST=0
+sbatch --nodes=4 --time=12:00:00 scripts/run_apertus_greek_cpt_clariden_multinode.sh
+```
+
+The multi-node launcher is data-parallel, not tensor-parallel. That means it improves throughput, but it does not reduce per-GPU model memory. The tracked multi-node defaults target the same effective global batch size of `256` as the single-node launcher by deriving:
+
+- `PER_DEVICE_TRAIN_BATCH_SIZE=1`
+- `TARGET_GLOBAL_BATCH_SIZE=256`
+- `GRADIENT_ACCUMULATION_STEPS=256 / (PER_DEVICE_TRAIN_BATCH_SIZE * WORLD_SIZE)`
+
+On 4 nodes with 4 GPUs each, that resolves to `GRADIENT_ACCUMULATION_STEPS=16`.
+
+The multi-node launcher also exports the Clariden network settings required beyond one node:
+
+- `NCCL_SOCKET_IFNAME=nmn0`
+- `GLOO_SOCKET_IFNAME=nmn0`
+- `NCCL_CROSS_NIC=1`
+- `FI_PROVIDER=cxi`
+
 The tracked launcher now uses conservative non-smoke defaults for the first real 2048-token run:
 
 - `MAX_SEQ_LENGTH=2048`
@@ -152,6 +177,15 @@ Useful overrides for the launcher:
 - `ATTN_IMPLEMENTATION=flash_attention_2`
 - `OVERWRITE_OUTPUT_DIR=1`
 - `SKIP_WARMUP=1`
+
+Useful overrides for the multi-node launcher:
+
+- `sbatch --nodes=4 --time=HH:MM:SS scripts/run_apertus_greek_cpt_clariden_multinode.sh`
+- `TARGET_GLOBAL_BATCH_SIZE=256`
+- `PER_DEVICE_TRAIN_BATCH_SIZE=1`
+- `GRADIENT_ACCUMULATION_STEPS=16`
+- `MASTER_PORT=29501`
+- `NPROC_PER_NODE=4`
 
 The launcher stages the repo into `${SCRATCH}`, exports the Hugging Face cache paths inside the container, disables the Clariden CXI hook that can interfere with container imports, and starts the training with:
 
