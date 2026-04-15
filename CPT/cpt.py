@@ -12,6 +12,7 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     DataCollatorForLanguageModeling,
+    PreTrainedTokenizerFast,
     Trainer,
     TrainingArguments,
     set_seed,
@@ -69,8 +70,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--attn-implementation",
-        default="flash_attention_2",
-        help="Attention backend passed to model loading, e.g. flash_attention_2 or eager.",
+        default="sdpa",
+        help="Attention backend passed to model loading, e.g. sdpa, flash_attention_2, or eager.",
     )
     parser.add_argument(
         "--gradient-checkpointing",
@@ -420,10 +421,60 @@ def build_training_dataset(args: argparse.Namespace, tokenizer):
 
 
 def load_tokenizer(args: argparse.Namespace):
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model_path,
-        trust_remote_code=args.trust_remote_code,
-    )
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model_path,
+            trust_remote_code=args.trust_remote_code,
+        )
+    except ValueError as exc:
+        if "Tokenizer class TokenizersBackend does not exist" not in str(exc):
+            raise
+
+        model_path = Path(args.model_path)
+        tokenizer_file = model_path / "tokenizer.json"
+        tokenizer_config_path = model_path / "tokenizer_config.json"
+        if not tokenizer_file.exists():
+            raise SystemExit(
+                f"Tokenizer metadata references TokenizersBackend, but {tokenizer_file} was not found."
+            ) from exc
+
+        tokenizer_config: Dict[str, Any] = {}
+        if tokenizer_config_path.exists():
+            tokenizer_config = json.loads(tokenizer_config_path.read_text(encoding="utf-8"))
+
+        compatible_kwargs: Dict[str, Any] = {
+            "tokenizer_file": str(tokenizer_file),
+        }
+        for key in (
+            "bos_token",
+            "eos_token",
+            "unk_token",
+            "sep_token",
+            "pad_token",
+            "cls_token",
+            "mask_token",
+            "additional_special_tokens",
+            "add_prefix_space",
+            "model_max_length",
+            "padding_side",
+            "truncation_side",
+            "clean_up_tokenization_spaces",
+            "model_input_names",
+        ):
+            if key in tokenizer_config:
+                compatible_kwargs[key] = tokenizer_config[key]
+
+        tokenizer = PreTrainedTokenizerFast(**compatible_kwargs)
+
+        chat_template_path = model_path / "chat_template.jinja"
+        if chat_template_path.exists():
+            tokenizer.chat_template = chat_template_path.read_text(encoding="utf-8")
+
+        rank_zero_print(
+            "Fell back to PreTrainedTokenizerFast because tokenizer_config.json references "
+            "TokenizersBackend, which is not available in the runtime transformers build."
+        )
+
     if tokenizer.pad_token is None:
         if tokenizer.eos_token is None:
             raise SystemExit("Tokenizer has no pad_token or eos_token. Set one before CPT.")
