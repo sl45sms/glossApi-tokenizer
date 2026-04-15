@@ -7,6 +7,10 @@ from typing import Any, Dict, List, Tuple
 from transformers import AutoTokenizer
 
 
+COMPATIBLE_TOKENIZER_CLASS = "PreTrainedTokenizerFast"
+INCOMPATIBLE_TOKENIZER_CLASSES = {"TokenizersBackend"}
+
+
 def build_parser(
     description: str,
     default_model_id: str,
@@ -102,6 +106,22 @@ def build_readable_tokenizer_json(tokenizer, tokenizer_json_path: Path) -> Tuple
     return readable_payload, collision_fallbacks, len(decoded_counts) != len(decoded_tokens)
 
 
+def normalize_tokenizer_config(tokenizer_dir: Path) -> Dict[str, Any]:
+    tokenizer_config_path = tokenizer_dir / "tokenizer_config.json"
+    if not tokenizer_config_path.exists():
+        return {}
+
+    payload = json.loads(tokenizer_config_path.read_text(encoding="utf-8"))
+    tokenizer_class = payload.get("tokenizer_class")
+    if tokenizer_class in INCOMPATIBLE_TOKENIZER_CLASSES:
+        payload["tokenizer_class"] = COMPATIBLE_TOKENIZER_CLASS
+        tokenizer_config_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    return payload
+
+
 def extract_tokenizer(args: argparse.Namespace) -> Dict[str, Any]:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     args.report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -112,6 +132,7 @@ def extract_tokenizer(args: argparse.Namespace) -> Dict[str, Any]:
         trust_remote_code=args.trust_remote_code,
     )
     tokenizer.save_pretrained(args.output_dir)
+    normalize_tokenizer_config(args.output_dir)
 
     tokenizer_json_path = args.output_dir / "tokenizer.json"
     readable_payload, collision_fallbacks, has_decoded_collisions = build_readable_tokenizer_json(
