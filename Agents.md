@@ -1,14 +1,17 @@
 # Agents / Runbook (CSCS Alps Clariden)
 
-This repository is intended to run on CSCS Alps, targeting Clariden, with the goal of adapting `swiss-ai/Apertus-8B-Instruct-2509` for better Greek coverage.
+This repository is intended to run on CSCS Alps, targeting Clariden, with the goal of adapting `swiss-ai/Apertus-8B-Instruct-2509` for better Greek coverage and then continuing pretraining with the updated vocabulary.
 
-The work is split into three stages:
+The practical workflow in this repo now has three stages:
 
 1. Extract the tokenizer from the target model.
-2. Extend the tokenizer with Greek-specific coverage.
-3. Continue training the model on Greek text with the updated tokenizer.
+2. Extend the tokenizer and build a resized model checkpoint aligned to it.
+3. Run CPT on Clariden with the aligned checkpoint, using `CPT/cpt.py` as the training entry point.
 
-The practical target is not only to add arbitrary tokens, but to improve tokenization efficiency and Greek text coverage without destabilizing the base model.
+Important constraint:
+
+- `artifacts/tokenizers/apertus-greek-v1` is the tokenizer artifact.
+- `CPT/cpt.py` must load a model checkpoint whose embeddings were already resized to that tokenizer. A tokenizer directory alone is not enough.
 
 There is also a local inspection tool in this repository:
 
@@ -22,12 +25,15 @@ There is also a local inspection tool in this repository:
 - Build-time tooling: `uenv` for Python and local preprocessing on Alps.
 - Target model: `swiss-ai/Apertus-8B-Instruct-2509`.
 - Greek reference tokenizer: `ilsp/Llama-Krikri-8B-Instruct`.
-- Greek corpus source: GlossAPI datasets and any additional curated Greek text.
+- Extended tokenizer artifact: `artifacts/tokenizers/apertus-greek-v1`.
+- CPT entry point: `CPT/cpt.py`.
+- Greek corpus source for CPT: `epfml/FineWeb2-HQ`, config `ell_Grek`, plus any additional curated Greek text.
+- English anchor corpus for CPT: `epfml/FineWeb-HQ`.
 
 Recommended operating split:
 
 - Use `uenv` for Python tooling, dataset inspection, token mining, and tokenizer preparation.
-- Use a container launched through Clariden's Container Engine for GPU jobs.
+- Use a container launched through Clariden's Container Engine for model initialization and GPU-side CPT jobs.
 - Do not mix `uenv` and the runtime container inside the same training job.
 
 References:
@@ -44,18 +50,16 @@ References:
 
 The intended workflow is:
 
-1. Pull the tokenizer for `swiss-ai/Apertus-8B-Instruct-2509` and inspect its tokenizer type.
-2. Collect candidate Greek additions from:
-	 - the tokenizer vocabulary of `ilsp/Llama-Krikri-8B-Instruct`
-	 - high-frequency substrings, words, and domain terms extracted from GlossAPI corpora
-3. Filter candidates so that only useful new entries are added.
-4. Resize model embeddings to match the new tokenizer.
-5. Continue pretraining on Greek corpora.
-6. Evaluate tokenization efficiency and downstream Greek behavior.
+1. Reuse or regenerate the extended tokenizer under `artifacts/tokenizers/apertus-greek-v1`.
+2. Create a model checkpoint whose embeddings are resized and initialized for that tokenizer.
+3. Point `CPT/cpt.py` at that aligned checkpoint through `model_path`.
+4. Launch a single-node Clariden CPT run with 4 GPUs using `torchrun`.
+5. Validate checkpoint save/reload and only then scale the run length or cluster shape.
 
-Important constraint:
+Important constraints:
 
 - Extending a tokenizer changes the embedding matrix shape. The model must be loaded and resized with the updated tokenizer before training or inference.
+- `CPT/cpt.py` only gets the intended 4-GPU global batch if it is launched with a distributed launcher such as `torchrun --nproc_per_node=4`. A plain `python CPT/cpt.py` run will stay single-process.
 
 ## 3. Clariden environment strategy
 
@@ -125,13 +129,16 @@ The image should include at least:
 - `safetensors`
 - optionally `deepspeed` or another distributed training stack if needed later
 
-### 3.4 Example EDF for tokenizer/training jobs
+### 3.4 Example EDF for tokenizer/model-init/CPT jobs
 
-Create an EDF file such as `~/.edf/apertus-greek.toml`:
+Create an EDF file such as `~/.edf/apertus-greek-clariden.toml`:
 
 ```toml
 image = "${SCRATCH}/images/apertus-greek-aarch64.sqsh"
-mounts = ["${SCRATCH}:${SCRATCH}"]
+mounts = [
+	"${SCRATCH}:${SCRATCH}",
+	"/capstor/store/cscs/swissai/a0140/p-skarvelis:/capstor/store/cscs/swissai/a0140/p-skarvelis",
+]
 workdir = "${SCRATCH}"
 
 [env]
@@ -144,7 +151,29 @@ HF_TOKEN = "${HF_TOKEN}"
 Then test it:
 
 ```bash
-srun -Aa0140 --environment=apertus-greek python -c 'import torch, transformers; print(torch.__version__)'
+srun -Aa0140 --environment=apertus-greek-clariden python -c 'import torch, transformers; print(torch.__version__); print(torch.cuda.device_count())'
+```
+
+If you keep `model_path` and `output_dir` under `${SCRATCH}`, you can drop the `/capstor/...` mount. Keep the mount only when the training script uses that storage path directly.
+
+### 3.5 Known-good Clariden launch settings
+
+The related Clariden project under `/users/p-skarvelis/GSDG` uses the following single-node CE settings, and they are a good starting point here as well:
+
+```bash
+export OCI_ANNOTATION_com__hooks__cxi__enabled=false
+export SLURM_NETWORK=disable_rdzv_get
+```
+
+Those settings are useful when the host CXI/libfabric hook interferes with the container runtime on Clariden.
+
+If you later scale CPT beyond one node, also pin the network stack explicitly:
+
+```bash
+export NCCL_SOCKET_IFNAME=nmn0
+export GLOO_SOCKET_IFNAME=nmn0
+export NCCL_CROSS_NIC=1
+export FI_PROVIDER=cxi
 ```
 
 ## 4. Stage 1: Extract the target tokenizer
@@ -302,64 +331,122 @@ Expected output of stage 2:
 - a candidate list with frequency counts
 - a short evaluation note comparing base and extended tokenizer behavior
 
-## 6. Stage 3: Continue training with the new tokenizer
+### 5.6 Build the aligned model checkpoint for CPT
 
-Once the tokenizer is extended, the model must be aligned to it before training.
+For CPT, the tokenizer directory alone is not sufficient. `CPT/cpt.py` loads both tokenizer and model from `model_path`, so that path must already contain a checkpoint whose embeddings were resized to `artifacts/tokenizers/apertus-greek-v1`.
 
-At minimum, the training pipeline needs to:
+Use `scripts/extend_apertus_tokenizer.py` with `--base-model` to create that aligned checkpoint:
 
-1. load the base model
-2. load the updated tokenizer
-3. resize token embeddings
-4. continue pretraining on Greek corpora
-5. save the adapted checkpoint
-
-Core step:
-
-```python
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-model_id = "swiss-ai/Apertus-8B-Instruct-2509"
-tok_dir = "artifacts/tokenizers/apertus-greek-v1"
-
-tokenizer = AutoTokenizer.from_pretrained(tok_dir, trust_remote_code=True)
-model = AutoModelForCausalLM.from_pretrained(model_id, trust_remote_code=True)
-model.resize_token_embeddings(len(tokenizer))
+```bash
+./run_uenv.sh python scripts/extend_apertus_tokenizer.py \
+	--base-tokenizer artifacts/tokenizers/apertus-base \
+	--token-file artifacts/vocab_candidates/selected_tokens_v1.txt \
+	--base-model swiss-ai/Apertus-8B-Instruct-2509 \
+	--checkpoint-output-dir "${SCRATCH}/apertus-greek-init" \
+	--torch-dtype bfloat16 \
+	--overwrite
 ```
 
-Important note:
+Notes:
 
-- Newly added embeddings start untrained. They only become useful after continued training.
+- When `--base-model` is enabled, the script loads the full base LM in order to resize and initialize the new embeddings. Run this step on a machine or job with enough memory.
+- If you already have an initialized checkpoint at a persistent path such as `/capstor/store/cscs/swissai/a0140/p-skarvelis/apertus-greek-init`, reuse it and point `CPT/cpt.py` there.
+- The resulting checkpoint directory is the value that should go into `model_path` in `CPT/cpt.py`.
 
-### 6.1 Training objective
+## 6. Stage 3: Continue training with the new tokenizer
 
-The simplest first objective is continued pretraining on Greek plain text or instruction-like Greek corpora.
+This repo's current stage-3 path is `CPT/cpt.py`. It assumes that the tokenizer extension work is already done and that `model_path` points to a checkpoint whose embeddings were resized to the extended tokenizer.
 
-Possible progression:
+### 6.1 What `CPT/cpt.py` does
 
-1. Continued pretraining on broad Greek text.
-2. Optional instruction tuning on Greek Q/A data.
-3. Optional domain adaptation on GlossAPI-specific educational material.
+The current script:
 
-### 6.2 Training strategy on Clariden
+- loads the aligned checkpoint from `model_path`
+- loads the tokenizer from the same directory
+- streams a 90% Greek / 10% English mixture
+- uses `bfloat16`, `flash_attention_2`, and gradient checkpointing for GH200-class GPUs
+- runs two phases:
+	1. embedding-only warm-up for 2000 steps at `1e-4`
+	2. full CPT for 50000 steps at `2e-5` with `warmup_steps=1000`
 
-For the first pass, keep the plan simple:
+Because the datasets are streamed, the schedule is step-driven rather than epoch-driven.
 
-- start with a small-scale continued pretraining run
-- validate the pipeline on a subset of Greek data
-- confirm that checkpoint save and reload works with the new tokenizer
-- only then scale to a longer run
+### 6.2 Required preconditions
 
-Depending on the final model memory profile, use one of:
+Before launching the script:
 
-- single-node fine-tuning if the model fits comfortably
-- distributed training across multiple GPUs if needed
+- `model_path` must point to the aligned checkpoint from stage 2, not just `artifacts/tokenizers/apertus-greek-v1`.
+- `output_dir` must point to a persistent mounted path such as `${SCRATCH}/apertus-greek-cpt` or `/capstor/store/cscs/swissai/a0140/p-skarvelis/apertus-greek-cpt`.
+- The Clariden container must have working support for `torch`, `transformers`, `datasets`, and the `flash_attention_2` path used by the script.
+- If `model_path` or `output_dir` stay under `/capstor/...`, that path must be mounted in the EDF.
 
-The exact launcher can be decided later, but the environment should remain:
+### 6.3 Launch shape on Clariden
 
-- Clariden-compatible container
-- Slurm allocation
-- caches under `${SCRATCH}`
+Start with a single Clariden node:
+
+- 1 node
+- 4 GPUs
+- 1 Slurm task that launches 4 local training workers with `torchrun`
+
+Important constraint:
+
+- The batch-size comment inside `CPT/cpt.py` assumes 4 GPUs. That is only true if the job is launched with `torchrun --nproc_per_node=4` or an equivalent distributed launcher.
+- If you run `python CPT/cpt.py` directly, `Trainer` will stay single-process and the effective global batch will be smaller than intended.
+
+Treat the current script as a single-node Clariden starting point. Only move to multi-node after the one-node path is stable; multi-node training will require a proper distributed launcher and the explicit Clariden network settings from section 3.5.
+
+### 6.4 Example single-node Clariden launcher
+
+A minimal Slurm pattern, adapted from the Clariden usage in the related `GSDG` project, is:
+
+```bash
+#!/bin/bash
+#SBATCH -A a0140
+#SBATCH --job-name=apertus-greek-cpt
+#SBATCH --partition=normal
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=4
+#SBATCH --cpus-per-task=32
+#SBATCH --time=24:00:00
+
+set -euo pipefail
+
+CE_ENVIRONMENT="${CE_ENVIRONMENT:-apertus-greek-clariden}"
+STAGE_ROOT="${SCRATCH}/glossapi-tokenizer_${SLURM_JOB_ID}"
+
+export OCI_ANNOTATION_com__hooks__cxi__enabled=false
+export SLURM_NETWORK=disable_rdzv_get
+
+rm -rf "${STAGE_ROOT}"
+mkdir -p "${STAGE_ROOT}"
+tar -C /users/p-skarvelis/glossApi-Tokenizer -cz CPT Agents.md | tar -xz -C "${STAGE_ROOT}"
+
+srun --environment="${CE_ENVIRONMENT}" --ntasks=1 bash -lc '
+	set -euo pipefail
+	export HF_HOME="${SCRATCH}/hf"
+	export TRANSFORMERS_CACHE="${SCRATCH}/hf"
+	export HF_DATASETS_CACHE="${SCRATCH}/hf_datasets"
+	export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+	cd "'"${STAGE_ROOT}"'"
+	python -m torch.distributed.run --standalone --nproc_per_node=4 CPT/cpt.py
+'
+```
+
+This launcher deliberately uses a single Slurm task and lets `torchrun` spawn the 4 local worker processes inside the Clariden container.
+
+### 6.5 First-run strategy
+
+Do not start with the full 50000-step job.
+
+First validate:
+
+1. the aligned checkpoint loads inside the CE environment
+2. all 4 GPUs are visible inside the job
+3. a short run writes checkpoints successfully
+4. the saved checkpoint can be reloaded with the tokenizer
+
+After that, scale the step counts back up to the intended long run.
 
 ## 7. Suggested directory layout
 
@@ -378,7 +465,16 @@ artifacts/
 		tokenizer_baseline.md
 		tokenizer_eval_v1.md
 	checkpoints/
-		apertus-greek-continued-pretrain/
+		apertus-greek-init/
+		apertus-greek-cpt-smoke/
+
+CPT/
+	cpt.py
+
+external persistent storage/
+	${SCRATCH}/apertus-greek-init/
+	${SCRATCH}/apertus-greek-cpt/
+	or /capstor/store/cscs/swissai/a0140/p-skarvelis/...
 ```
 
 ## 8. Validation checklist
@@ -386,17 +482,20 @@ artifacts/
 Before accepting the new tokenizer and model, verify:
 
 - the tokenizer can be loaded and saved cleanly
-- the model can be loaded with the new tokenizer
-- `resize_token_embeddings` runs without mismatch errors
+- the aligned checkpoint can be loaded with the new tokenizer
+- `len(tokenizer)` matches the checkpoint embedding matrix size
+- the training paths used in `CPT/cpt.py` are visible inside the Clariden container
+- the job is launched with `torchrun` and sees all 4 Clariden GPUs
 - Greek sample text uses fewer or better tokens than before
 - no special tokens were broken or removed
 - training data preprocessing is consistent across runs
+- the CPT job writes intermediate checkpoints successfully
 - a saved checkpoint can be reloaded for inference
 
 Useful evaluation comparisons:
 
 - base tokenizer vs extended tokenizer on the same Greek corpus
-- base model vs continued-pretrained model on Greek prompts
+- base initialized model vs continued-pretrained model on Greek prompts
 - token count reduction on representative GlossAPI samples
 - manual inspection in the visualizer for representative Greek sentences and domain terms
 
@@ -406,22 +505,19 @@ The practical order for this repository should be:
 
 1. Set up `uenv` on Alps for preprocessing.
 2. Create or validate the Clariden EDF and container.
-3. Extract and save the Apertus tokenizer.
-4. Compare it against the Krikri tokenizer.
-5. Use the local visualizer to inspect representative Greek tokenization cases.
-6. Mine candidate tokens from GlossAPI Greek text.
-7. Build a conservative extended tokenizer.
-8. Evaluate tokenization efficiency on Greek samples.
-9. Resize Apertus embeddings and run a small continued-pretraining job.
-10. Scale up only after the small run is stable.
+3. Reuse or regenerate the base and extended tokenizer artifacts.
+4. Create or reuse the aligned checkpoint with `scripts/extend_apertus_tokenizer.py --base-model`.
+5. Set `model_path` and `output_dir` in `CPT/cpt.py` to mounted persistent storage.
+6. Run a short single-node Clariden smoke test with `torchrun`.
+7. Launch the longer 4-GPU CPT job.
+8. Reload the saved checkpoint and evaluate Greek behavior.
+9. Only then consider multi-node scaling.
 
 ## 10. Immediate next milestone
 
-The first concrete deliverable should be:
+The first concrete deliverable for the current repo state should be:
 
-1. a saved local copy of the Apertus tokenizer
-2. a script or notebook that compares Greek segmentation between Apertus and Krikri
-3. a local visualizer for interactive tokenization inspection
-4. a first filtered candidate token list derived from GlossAPI text
-
-After that, the repo can move to the first `apertus-greek-v1` tokenizer release.
+1. a persistent `apertus-greek-init` checkpoint aligned with `apertus-greek-v1`
+2. a successful single-node Clariden CPT smoke run from `CPT/cpt.py`
+3. a saved checkpoint that reloads cleanly with the tokenizer
+4. a production-length Clariden CPT run after the smoke path is stable
