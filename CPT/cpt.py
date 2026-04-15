@@ -167,6 +167,12 @@ def parse_args() -> argparse.Namespace:
         default=2048,
         help="Maximum sequence length used during tokenization.",
     )
+    parser.add_argument(
+        "--smoke-max-seq-length",
+        type=int,
+        default=1024,
+        help="Maximum sequence length used during tokenization when --smoke-test is enabled.",
+    )
 
     parser.add_argument(
         "--per-device-train-batch-size",
@@ -274,12 +280,26 @@ def parse_args() -> argparse.Namespace:
         default=5,
         help="Full-phase scheduler warmup steps used when --smoke-test is enabled.",
     )
+    parser.add_argument(
+        "--smoke-per-device-train-batch-size",
+        type=int,
+        default=1,
+        help="Per-device batch size used when --smoke-test is enabled.",
+    )
+    parser.add_argument(
+        "--smoke-gradient-accumulation-steps",
+        type=int,
+        default=1,
+        help="Gradient accumulation steps used when --smoke-test is enabled.",
+    )
     return parser.parse_args()
 
 
 def validate_args(args: argparse.Namespace) -> None:
     if args.max_seq_length <= 0:
         raise SystemExit("--max-seq-length must be positive.")
+    if args.smoke_max_seq_length <= 0:
+        raise SystemExit("--smoke-max-seq-length must be positive.")
     if args.tokenize_batch_size <= 0:
         raise SystemExit("--tokenize-batch-size must be positive.")
     if args.per_device_train_batch_size <= 0:
@@ -296,6 +316,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("Phase step counts cannot be negative.")
     if args.smoke_warmup_steps <= 0 or args.smoke_full_steps <= 0:
         raise SystemExit("Smoke-test step counts must be positive.")
+    if args.smoke_per_device_train_batch_size <= 0:
+        raise SystemExit("--smoke-per-device-train-batch-size must be positive.")
+    if args.smoke_gradient_accumulation_steps <= 0:
+        raise SystemExit("--smoke-gradient-accumulation-steps must be positive.")
     if args.smoke_full_warmup_steps < 0:
         raise SystemExit("--smoke-full-warmup-steps cannot be negative.")
     if args.full_warmup_steps < 0:
@@ -366,8 +390,15 @@ def tokenize_batch(
     return tokenizer(
         list(examples[text_column]),
         truncation=True,
+        padding="max_length",
         max_length=max_seq_length,
     )
+
+
+def effective_max_seq_length(args: argparse.Namespace) -> int:
+    if args.smoke_test:
+        return args.smoke_max_seq_length
+    return args.max_seq_length
 
 
 def load_streaming_dataset(dataset_name: str, dataset_config: str | None, split: str):
@@ -410,7 +441,7 @@ def build_training_dataset(args: argparse.Namespace, tokenizer):
             tokenize_batch,
             tokenizer=tokenizer,
             text_column=args.text_column,
-            max_seq_length=args.max_seq_length,
+            max_seq_length=effective_max_seq_length(args),
         ),
         "batched": True,
         "batch_size": args.tokenize_batch_size,
@@ -486,7 +517,7 @@ def load_tokenizer(args: argparse.Namespace):
 def load_model(args: argparse.Namespace):
     model_kwargs: Dict[str, Any] = {
         "trust_remote_code": args.trust_remote_code,
-        "torch_dtype": resolve_torch_dtype(args.torch_dtype),
+        "dtype": resolve_torch_dtype(args.torch_dtype),
     }
     if args.attn_implementation:
         model_kwargs["attn_implementation"] = args.attn_implementation
@@ -573,6 +604,18 @@ def phase_steps(args: argparse.Namespace) -> Dict[str, Dict[str, float | int]]:
     }
 
 
+def effective_batch_settings(args: argparse.Namespace) -> Dict[str, int]:
+    if args.smoke_test:
+        return {
+            "per_device_train_batch_size": args.smoke_per_device_train_batch_size,
+            "gradient_accumulation_steps": args.smoke_gradient_accumulation_steps,
+        }
+    return {
+        "per_device_train_batch_size": args.per_device_train_batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+    }
+
+
 def training_arguments(
     args: argparse.Namespace,
     phase_name: str,
@@ -583,13 +626,14 @@ def training_arguments(
 ) -> TrainingArguments:
     logging_steps = max(1, min(args.logging_steps, max_steps))
     save_steps = max(1, min(args.save_steps, max_steps))
+    batch_settings = effective_batch_settings(args)
 
     training_kwargs: Dict[str, Any] = {
         "output_dir": str(phase_output_dir),
         "overwrite_output_dir": args.overwrite_output_dir,
         "run_name": f"{args.run_name}-{phase_name}",
-        "per_device_train_batch_size": args.per_device_train_batch_size,
-        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "per_device_train_batch_size": batch_settings["per_device_train_batch_size"],
+        "gradient_accumulation_steps": batch_settings["gradient_accumulation_steps"],
         "max_steps": max_steps,
         "learning_rate": learning_rate,
         "warmup_steps": warmup_steps,
@@ -607,6 +651,10 @@ def training_arguments(
         "data_seed": args.seed,
         "remove_unused_columns": True,
         "save_safetensors": True,
+        "accelerator_config": {
+            "dispatch_batches": False,
+            "split_batches": False,
+        },
     }
     if world_size() > 1:
         training_kwargs["ddp_find_unused_parameters"] = False
@@ -673,13 +721,18 @@ def save_run_config(args: argparse.Namespace, current_world_size: int, tokenizer
 
     output_dir = Path(args.output_dir)
     ensure_output_dir(output_dir)
+    batch_settings = effective_batch_settings(args)
     effective_global_batch = (
-        args.per_device_train_batch_size * args.gradient_accumulation_steps * current_world_size
+        batch_settings["per_device_train_batch_size"]
+        * batch_settings["gradient_accumulation_steps"]
+        * current_world_size
     )
     payload = {
         "args": vars(args),
         "world_size": current_world_size,
         "effective_global_batch_size": effective_global_batch,
+        "effective_batch_settings": batch_settings,
+        "effective_max_seq_length": effective_max_seq_length(args),
         "tokenizer_vocab_size": tokenizer_vocab_size,
         "phase_plan": phase_steps(args),
     }
@@ -713,12 +766,18 @@ def main() -> None:
     train_dataset = build_training_dataset(args, tokenizer)
     save_run_config(args, current_world_size, len(tokenizer))
 
+    batch_settings = effective_batch_settings(args)
     effective_global_batch = (
-        args.per_device_train_batch_size * args.gradient_accumulation_steps * current_world_size
+        batch_settings["per_device_train_batch_size"]
+        * batch_settings["gradient_accumulation_steps"]
+        * current_world_size
     )
     rank_zero_print(
         "Loaded aligned checkpoint successfully. "
         f"world_size={current_world_size}, effective_global_batch_size={effective_global_batch}, "
+        f"per_device_train_batch_size={batch_settings['per_device_train_batch_size']}, "
+        f"gradient_accumulation_steps={batch_settings['gradient_accumulation_steps']}, "
+        f"max_seq_length={effective_max_seq_length(args)}, "
         f"vocab_size={len(tokenizer)}."
     )
 

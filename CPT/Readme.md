@@ -27,6 +27,8 @@ Build or refresh it with:
 
 That checkpoint path is what `CPT/cpt.py` must receive through `--model-path`.
 
+Older aligned checkpoints saved from the earlier tokenizer workflow may advertise `tokenizer_class: TokenizersBackend` in `tokenizer_config.json`. The current CPT loader handles that compatibility case automatically, and the tokenizer extraction/extension scripts now normalize future saved tokenizer configs to `PreTrainedTokenizerFast`.
+
 ## Training entry point
 
 `CPT/cpt.py` is now a proper CLI training script instead of a hardcoded prototype.
@@ -37,7 +39,9 @@ Useful options:
 - `--output-dir`: persistent training output directory
 - `--smoke-test`: short validation run
 - `--skip-warmup`: skip the embedding-only phase
-- `--attn-implementation eager`: fallback when `flash_attention_2` is unavailable
+- `--attn-implementation sdpa`: default backend that works without extra attention kernels
+- streaming text is tokenized with `padding="max_length"` so distributed smoke runs do not fail on variable-length iterable batches
+- smoke mode defaults to `per_device_train_batch_size=1`, `gradient_accumulation_steps=1`, and `smoke_max_seq_length=1024` so the first Clariden validation run stays well below the full 2048-token production footprint
 - `--expected-world-size 4 --require-distributed`: fail fast if the launch shape is wrong
 
 Inspect the full CLI with:
@@ -53,6 +57,57 @@ Use the tracked Slurm launcher in `scripts/run_apertus_greek_cpt_clariden.sh` fo
 The matching Container Engine template is tracked in `edf/apertus-greek-clariden.toml`.
 
 The launcher automatically sources `${REPO_ROOT}/.env` before calling `srun`, so keeping `HF_TOKEN=...` in the repo-local `.env` file is enough for the CE environment expansion.
+
+## Build the Clariden image
+
+You need the CE image before the smoke test can run. The EDF points at `${SCRATCH}/images/apertus-greek-aarch64.sqsh`, so that file must exist first.
+
+The repo includes `scripts/build_apertus_greek_clariden_image.sh` to create it.
+
+Default behavior:
+
+- output image: `${SCRATCH}/images/apertus-greek-aarch64.sqsh`
+- base image: `${BASE_SQSH}` when set, otherwise the script auto-detects an existing Clariden-compatible base image such as `${SCRATCH}/images/gsdg-qwen3_clariden_latest.sqsh`
+- runtime Python env inside the image: `/opt/apertus-greek-venv`
+
+Build it with:
+
+```bash
+sbatch scripts/build_apertus_greek_clariden_image.sh
+```
+
+If you want to pin the base image explicitly:
+
+```bash
+export BASE_SQSH=${SCRATCH}/images/gsdg-qwen3_clariden_latest.sqsh
+sbatch scripts/build_apertus_greek_clariden_image.sh
+```
+
+The build script requests `128G` by default, installs only the runtime packages needed for CPT, limits `enroot create` CPU affinity, and caps `mksquashfs` to 8 workers to reduce the export-time memory spike.
+
+If you hit memory pressure during squash export, lower the worker counts further when submitting:
+
+```bash
+export BASE_SQSH=${SCRATCH}/images/gsdg-qwen3_clariden_latest.sqsh
+export ENROOT_CREATE_PROCS=4
+export MKSQUASHFS_PROCS=4
+sbatch --mem=160G scripts/build_apertus_greek_clariden_image.sh
+```
+
+If you later want to experiment with `flash_attention_2`, you can ask the build job to try installing `flash-attn`:
+
+```bash
+export BASE_SQSH=${SCRATCH}/images/gsdg-qwen3_clariden_latest.sqsh
+export INSTALL_FLASH_ATTN=1
+sbatch scripts/build_apertus_greek_clariden_image.sh
+```
+
+For the default repo image path, the tracked EDF already matches the produced filename. If needed, refresh your local CE definition with:
+
+```bash
+mkdir -p ~/.edf
+cp edf/apertus-greek-clariden.toml ~/.edf/apertus-greek-clariden.toml
+```
 
 Smoke test example:
 
@@ -82,7 +137,11 @@ Useful overrides for the launcher:
 - `FULL_WARMUP_STEPS=1000`
 - `PER_DEVICE_TRAIN_BATCH_SIZE=16`
 - `GRADIENT_ACCUMULATION_STEPS=4`
-- `ATTN_IMPLEMENTATION=eager`
+- `SMOKE_PER_DEVICE_TRAIN_BATCH_SIZE=2`
+- `SMOKE_GRADIENT_ACCUMULATION_STEPS=1`
+- `SMOKE_MAX_SEQ_LENGTH=1024`
+- `ATTN_IMPLEMENTATION=sdpa`
+- `ATTN_IMPLEMENTATION=flash_attention_2`
 - `OVERWRITE_OUTPUT_DIR=1`
 - `SKIP_WARMUP=1`
 
@@ -91,6 +150,10 @@ The launcher stages the repo into `${SCRATCH}`, exports the Hugging Face cache p
 ```bash
 python -m torch.distributed.run --standalone --nproc_per_node=4 CPT/cpt.py ...
 ```
+
+The default attention backend is now `sdpa`, which works without extra attention kernels in the image. Use `ATTN_IMPLEMENTATION=flash_attention_2` only when the container actually includes `flash-attn`.
+The launcher also pins `TRITON_CACHE_DIR` under `${SCRATCH}` so Triton does not try to cache autotune state under an unavailable home-directory path inside the container.
+It also sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` by default to reduce allocator fragmentation on the first backward pass.
 
 On the Clariden `normal` partition, the maximum walltime is `12:00:00`. The tracked Slurm script now uses that as its default, and you can request a shorter walltime with `sbatch --time=...`.
 
