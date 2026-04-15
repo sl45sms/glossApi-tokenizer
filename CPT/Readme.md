@@ -59,7 +59,7 @@ export CE_ENVIRONMENT=apertus-greek-clariden
 export MODEL_PATH=${SCRATCH}/apertus-greek-init
 export OUTPUT_DIR=${SCRATCH}/apertus-greek-cpt-smoke
 export SMOKE_TEST=1
-sbatch scripts/run_apertus_greek_cpt_clariden.sh
+sbatch --time=01:00:00 scripts/run_apertus_greek_cpt_clariden.sh
 ```
 
 Production-length example:
@@ -69,11 +69,12 @@ export CE_ENVIRONMENT=apertus-greek-clariden
 export MODEL_PATH=${SCRATCH}/apertus-greek-init
 export OUTPUT_DIR=${SCRATCH}/apertus-greek-cpt
 export SMOKE_TEST=0
-sbatch scripts/run_apertus_greek_cpt_clariden.sh
+sbatch --time=12:00:00 scripts/run_apertus_greek_cpt_clariden.sh
 ```
 
 Useful overrides for the launcher:
 
+- `sbatch --time=HH:MM:SS scripts/run_apertus_greek_cpt_clariden.sh`
 - `FULL_MAX_STEPS=50000`
 - `WARMUP_MAX_STEPS=2000`
 - `FULL_WARMUP_STEPS=1000`
@@ -88,6 +89,10 @@ The launcher stages the repo into `${SCRATCH}`, exports the Hugging Face cache p
 ```bash
 python -m torch.distributed.run --standalone --nproc_per_node=4 CPT/cpt.py ...
 ```
+
+On the Clariden `normal` partition, the maximum walltime is `12:00:00`. The tracked Slurm script now uses that as its default, and you can request a shorter walltime with `sbatch --time=...`.
+
+Longer CPT runs are expected to span multiple allocations. Re-submit the same launcher with the same `OUTPUT_DIR` and the training script will automatically resume from the latest checkpoint in `OUTPUT_DIR/warmup/` or `OUTPUT_DIR/full/`. Use `OVERWRITE_OUTPUT_DIR=1` only when you explicitly want to discard the previous phase checkpoints and restart from scratch.
 
 ## Outputs
 
