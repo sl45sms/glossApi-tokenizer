@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 
 from transformers import AutoTokenizer
 
-from tokenizer_extract_common import build_readable_tokenizer_json
+from tokenizer_extract_common import build_readable_tokenizer_json, normalize_tokenizer_config
 
 
 DEFAULT_BASE_TOKENIZER = Path("artifacts/tokenizers/apertus-base")
@@ -315,6 +315,7 @@ def initialize_model_embeddings(
     model.save_pretrained(args.model_output_dir)
     if args.model_output_dir.resolve() != args.output_dir.resolve():
         tokenizer.save_pretrained(args.model_output_dir)
+        normalize_tokenizer_config(args.model_output_dir)
 
     return {
         "enabled": True,
@@ -401,6 +402,7 @@ def main() -> None:
 
     num_added = tokenizer.add_tokens(tokens_to_add)
     tokenizer.save_pretrained(args.output_dir)
+    normalize_tokenizer_config(args.output_dir)
 
     if args.base_model:
         model_initialization_info = initialize_model_embeddings(
