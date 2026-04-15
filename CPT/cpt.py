@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import shutil
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Sequence
@@ -15,6 +16,7 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
+from transformers.trainer_utils import get_last_checkpoint
 
 
 DEFAULT_MODEL_PATH = "/capstor/store/cscs/swissai/a0140/p-skarvelis/apertus-greek-init/"
@@ -343,6 +345,12 @@ def ensure_output_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
+def reset_phase_output_dir(path: Path) -> None:
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True, exist_ok=True)
+
+
 def has_text(example: Dict[str, Any], text_column: str) -> bool:
     text = example.get(text_column)
     return isinstance(text, str) and bool(text.strip())
@@ -569,7 +577,17 @@ def run_phase(
         return None
 
     phase_output_dir = Path(args.output_dir) / phase_name
-    ensure_output_dir(phase_output_dir)
+    if args.overwrite_output_dir:
+        if is_world_process_zero():
+            reset_phase_output_dir(phase_output_dir)
+        maybe_barrier()
+    else:
+        ensure_output_dir(phase_output_dir)
+
+    resume_checkpoint = None
+    if not args.overwrite_output_dir:
+        resume_checkpoint = get_last_checkpoint(str(phase_output_dir))
+
     trainer = Trainer(
         model=model,
         args=training_arguments(
@@ -588,7 +606,11 @@ def run_phase(
         f"Starting phase '{phase_name}' with max_steps={max_steps}, learning_rate={learning_rate}, "
         f"scheduler_warmup_steps={warmup_steps}."
     )
-    trainer.train()
+    if resume_checkpoint:
+        rank_zero_print(f"Resuming phase '{phase_name}' from {resume_checkpoint}.")
+        trainer.train(resume_from_checkpoint=resume_checkpoint)
+    else:
+        trainer.train()
     trainer.save_state()
     maybe_barrier()
     return trainer
