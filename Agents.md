@@ -129,6 +129,15 @@ The image should include at least:
 - `safetensors`
 - optionally `deepspeed` or another distributed training stack if needed later
 
+This repo includes a helper to build the expected image path from an existing Clariden-compatible base `.sqsh`:
+
+```bash
+sbatch scripts/build_apertus_greek_clariden_image.sh
+```
+
+By default it writes `${SCRATCH}/images/apertus-greek-aarch64.sqsh`, which matches the tracked EDF template.
+The build job uses a smaller runtime dependency set than the full repo requirements and caps squashfs worker counts to reduce OOM risk during image export.
+
 ### 3.4 Example EDF for tokenizer/model-init/CPT jobs
 
 Create an EDF file such as `~/.edf/apertus-greek-clariden.toml`:
@@ -143,9 +152,8 @@ workdir = "${SCRATCH}"
 
 [env]
 HF_HOME = "${SCRATCH}/hf"
-TRANSFORMERS_CACHE = "${SCRATCH}/hf"
 HF_DATASETS_CACHE = "${SCRATCH}/hf_datasets"
-HF_TOKEN = "${HF_TOKEN}"
+HF_TOKEN = "${HF_TOKEN:-}"
 ```
 
 Then test it:
@@ -364,7 +372,7 @@ The current script:
 - loads the aligned checkpoint from `model_path`
 - loads the tokenizer from the same directory
 - streams a 90% Greek / 10% English mixture
-- uses `bfloat16`, `flash_attention_2`, and gradient checkpointing for GH200-class GPUs
+- uses `bfloat16`, `sdpa` by default, and gradient checkpointing for GH200-class GPUs
 - runs two phases:
 	1. embedding-only warm-up for 2000 steps at `1e-4`
 	2. full CPT for 50000 steps at `2e-5` with `warmup_steps=1000`
@@ -377,7 +385,7 @@ Before launching the script:
 
 - `model_path` must point to the aligned checkpoint from stage 2, not just `artifacts/tokenizers/apertus-greek-v1`.
 - `output_dir` must point to a persistent mounted path such as `${SCRATCH}/apertus-greek-cpt` or `/capstor/store/cscs/swissai/a0140/p-skarvelis/apertus-greek-cpt`.
-- The Clariden container must have working support for `torch`, `transformers`, `datasets`, and the `flash_attention_2` path used by the script.
+- The Clariden container must have working support for `torch`, `transformers`, and `datasets`. `flash_attention_2` is optional; the default launcher path uses `sdpa` unless you override it.
 - If `model_path` or `output_dir` stay under `/capstor/...`, that path must be mounted in the EDF.
 
 ### 6.3 Launch shape on Clariden
