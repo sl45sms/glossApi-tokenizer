@@ -52,6 +52,8 @@ Use the tracked Slurm launcher in `scripts/run_apertus_greek_cpt_clariden.sh` fo
 
 The matching Container Engine template is tracked in `edf/apertus-greek-clariden.toml`.
 
+The launcher automatically sources `${REPO_ROOT}/.env` before calling `srun`, so keeping `HF_TOKEN=...` in the repo-local `.env` file is enough for the CE environment expansion.
+
 Smoke test example:
 
 ```bash
