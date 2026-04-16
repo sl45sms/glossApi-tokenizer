@@ -1,11 +1,12 @@
 image = "${SCRATCH}/images/apertus-greek-aarch64.sqsh"
 mounts = [
 	"${SCRATCH}:${SCRATCH}",
-	"/capstor/store/cscs/swissai/a0140/p-skarvelis:/capstor/store/cscs/swissai/a0140/p-skarvelis",
+	"/capstor:/capstor",
 ]
 workdir = "${SCRATCH}"
 
 [env]
-HF_HOME = "${SCRATCH}/hf"
-HF_DATASETS_CACHE = "${SCRATCH}/hf_datasets"
+HF_HOME = "/iopsstor/scratch/cscs/${USER}/hf"
+HF_DATASETS_CACHE = "/iopsstor/scratch/cscs/${USER}/hf_datasets"
+TRITON_CACHE_DIR = "/iopsstor/scratch/cscs/${USER}/triton/cache"
 HF_TOKEN = "${HF_TOKEN:-}"
