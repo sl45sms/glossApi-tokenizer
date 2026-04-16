@@ -1,4 +1,5 @@
 import argparse
+import gc
 import json
 import os
 import shutil
@@ -721,9 +722,10 @@ def write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def checkpoint_global_step(checkpoint_path: Path | None) -> int:
+def checkpoint_global_step(checkpoint_path: str | Path | None) -> int:
     if checkpoint_path is None:
         return 0
+    checkpoint_path = Path(checkpoint_path)
     prefix = "checkpoint-"
     if checkpoint_path.name.startswith(prefix):
         suffix = checkpoint_path.name[len(prefix) :]
@@ -842,10 +844,6 @@ def run_phase(
     else:
         ensure_output_dir(phase_output_dir)
 
-    resume_checkpoint = None
-    if not args.overwrite_output_dir:
-        resume_checkpoint = get_last_checkpoint(str(phase_output_dir))
-
     trainer = Trainer(
         model=model,
         args=training_arguments(
@@ -860,6 +858,20 @@ def run_phase(
         data_collator=causal_lm_data_collator,
     )
 
+    resume_checkpoint = None
+    resume_global_step = 0
+    if not args.overwrite_output_dir:
+        resume_checkpoint = get_last_checkpoint(str(phase_output_dir))
+        resume_global_step = checkpoint_global_step(resume_checkpoint)
+
+    if resume_global_step >= max_steps:
+        if resume_checkpoint:
+            trainer._load_from_checkpoint(resume_checkpoint)
+        rank_zero_print(
+            f"Skipping phase '{phase_name}' because checkpoint {resume_checkpoint} already reached step {resume_global_step}."
+        )
+        return trainer
+
     current_world_size = world_size()
 
     rank_zero_print(
@@ -873,7 +885,6 @@ def run_phase(
         train_result = trainer.train()
     if not args.benchmark_mode:
         trainer.save_state()
-    resume_global_step = checkpoint_global_step(resume_checkpoint)
     steps_completed = max(trainer.state.global_step - resume_global_step, 0)
     save_phase_metrics(
         args=args,
@@ -923,6 +934,26 @@ def save_final_checkpoint(trainer: Trainer, tokenizer, output_dir: str) -> None:
     maybe_barrier()
 
 
+def release_trainer_resources(trainer: Trainer | None) -> None:
+    if trainer is None:
+        return
+
+    optimizer = getattr(trainer, "optimizer", None)
+    if optimizer is not None:
+        optimizer.zero_grad(set_to_none=True)
+        optimizer.state.clear()
+
+    trainer.optimizer = None
+    trainer.lr_scheduler = None
+    trainer.train_dataset = None
+    trainer.eval_dataset = None
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    maybe_barrier()
+
+
 def main() -> None:
     args = parse_args()
     validate_args(args)
@@ -953,7 +984,7 @@ def main() -> None:
     trainer: Trainer | None = None
     if not args.skip_warmup:
         embedding_warmup_mode(model)
-        trainer = run_phase(
+        warmup_trainer = run_phase(
             args,
             phase_name="warmup",
             model=model,
@@ -963,6 +994,8 @@ def main() -> None:
             learning_rate=float(plan["warmup"]["learning_rate"]),
             warmup_steps=int(plan["warmup"]["warmup_steps"]),
         )
+        release_trainer_resources(warmup_trainer)
+        del warmup_trainer
 
     full_training_mode(model)
     full_phase_trainer = run_phase(

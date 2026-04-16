@@ -86,3 +86,22 @@ The numbers to compare between the 4-GPU and 16-GPU runs are these fields inside
 * effective_global_batch_size
 * effective_max_seq_length
 
+# production run on 4 nodes
+```
+cd /users/p-skarvelis/glossApi-Tokenizer
+
+export CE_ENVIRONMENT=apertus-greek-clariden
+export MODEL_PATH=/iopsstor/scratch/cscs/${USER}/apertus-greek-init
+export OUTPUT_DIR=/capstor/scratch/cscs/${USER}/apertus-greek-cpt-prod-xielu-sdpa-nogc
+export PREPARED_TRAIN_DATASET_DIR=/iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-packed-bench-2048
+export ATTN_IMPLEMENTATION=sdpa
+export GRADIENT_CHECKPOINTING=0
+export PER_DEVICE_TRAIN_BATCH_SIZE=1
+export TARGET_GLOBAL_BATCH_SIZE=256
+unset GRADIENT_ACCUMULATION_STEPS
+export BENCHMARK_MODE=0
+export SMOKE_TEST=0
+export SKIP_WARMUP=0
+
+sbatch --nodes=4 --time=12:00:00 scripts/run_apertus_greek_cpt_clariden_multinode.sh
+```

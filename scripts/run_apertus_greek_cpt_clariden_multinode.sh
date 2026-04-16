@@ -77,14 +77,28 @@ TOKENIZE_BATCH_SIZE="${TOKENIZE_BATCH_SIZE:-1000}"
 PER_DEVICE_TRAIN_BATCH_SIZE="${PER_DEVICE_TRAIN_BATCH_SIZE:-1}"
 TARGET_GLOBAL_BATCH_SIZE="${TARGET_GLOBAL_BATCH_SIZE:-256}"
 GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-}"
-if [[ -z "${GRADIENT_ACCUMULATION_STEPS}" ]]; then
-	denominator=$((PER_DEVICE_TRAIN_BATCH_SIZE * EXPECTED_WORLD_SIZE))
-	if (( TARGET_GLOBAL_BATCH_SIZE % denominator != 0 )); then
-		echo "TARGET_GLOBAL_BATCH_SIZE=${TARGET_GLOBAL_BATCH_SIZE} is not divisible by PER_DEVICE_TRAIN_BATCH_SIZE * EXPECTED_WORLD_SIZE (${denominator})." >&2
-		echo "Set GRADIENT_ACCUMULATION_STEPS explicitly for this launch shape." >&2
+STRICT_TARGET_GLOBAL_BATCH_SIZE="${STRICT_TARGET_GLOBAL_BATCH_SIZE:-1}"
+denominator=$((PER_DEVICE_TRAIN_BATCH_SIZE * EXPECTED_WORLD_SIZE))
+derived_gradient_accumulation_steps=""
+if (( TARGET_GLOBAL_BATCH_SIZE % denominator == 0 )); then
+	derived_gradient_accumulation_steps=$((TARGET_GLOBAL_BATCH_SIZE / denominator))
+fi
+
+if [[ -n "${GRADIENT_ACCUMULATION_STEPS}" ]]; then
+	if [[ -n "${derived_gradient_accumulation_steps}" && "${GRADIENT_ACCUMULATION_STEPS}" != "${derived_gradient_accumulation_steps}" ]]; then
+		echo "GRADIENT_ACCUMULATION_STEPS=${GRADIENT_ACCUMULATION_STEPS} conflicts with TARGET_GLOBAL_BATCH_SIZE=${TARGET_GLOBAL_BATCH_SIZE} for PER_DEVICE_TRAIN_BATCH_SIZE=${PER_DEVICE_TRAIN_BATCH_SIZE} and EXPECTED_WORLD_SIZE=${EXPECTED_WORLD_SIZE}." >&2
+		echo "Unset GRADIENT_ACCUMULATION_STEPS or set it to ${derived_gradient_accumulation_steps} for this launch shape." >&2
 		exit 1
 	fi
-	GRADIENT_ACCUMULATION_STEPS=$((TARGET_GLOBAL_BATCH_SIZE / denominator))
+elif [[ -n "${derived_gradient_accumulation_steps}" ]]; then
+	GRADIENT_ACCUMULATION_STEPS="${derived_gradient_accumulation_steps}"
+elif [[ "${STRICT_TARGET_GLOBAL_BATCH_SIZE}" == "1" ]]; then
+	echo "TARGET_GLOBAL_BATCH_SIZE=${TARGET_GLOBAL_BATCH_SIZE} is not divisible by PER_DEVICE_TRAIN_BATCH_SIZE * EXPECTED_WORLD_SIZE (${denominator})." >&2
+	echo "Set GRADIENT_ACCUMULATION_STEPS explicitly for this launch shape, or export STRICT_TARGET_GLOBAL_BATCH_SIZE=0 to keep the explicit value unchecked." >&2
+	exit 1
+elif [[ -z "${GRADIENT_ACCUMULATION_STEPS}" ]]; then
+	echo "TARGET_GLOBAL_BATCH_SIZE=${TARGET_GLOBAL_BATCH_SIZE} is not divisible by PER_DEVICE_TRAIN_BATCH_SIZE * EXPECTED_WORLD_SIZE (${denominator}), and GRADIENT_ACCUMULATION_STEPS was not provided." >&2
+	exit 1
 fi
 DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-4}"
 LOGGING_STEPS="${LOGGING_STEPS:-10}"
@@ -172,6 +186,9 @@ echo "Staged workspace into ${STAGE_ROOT}" >&2
 echo "Using MASTER_ADDR=${MASTER_ADDR} MASTER_PORT=${MASTER_PORT}" >&2
 echo "Using ${SLURM_NNODES} node(s), ${NPROC_PER_NODE} process(es) per node, world_size=${EXPECTED_WORLD_SIZE}" >&2
 echo "Using max_seq_length=${MAX_SEQ_LENGTH}, per_device_train_batch_size=${PER_DEVICE_TRAIN_BATCH_SIZE}, gradient_accumulation_steps=${GRADIENT_ACCUMULATION_STEPS}, effective_global_batch_size=${effective_global_batch}" >&2
+if [[ -n "${derived_gradient_accumulation_steps}" ]]; then
+	echo "Derived gradient_accumulation_steps=${derived_gradient_accumulation_steps} from TARGET_GLOBAL_BATCH_SIZE=${TARGET_GLOBAL_BATCH_SIZE}" >&2
+fi
 echo "Using NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME} FI_PROVIDER=${FI_PROVIDER}" >&2
 
 SRUN_EXPORT="ALL"
