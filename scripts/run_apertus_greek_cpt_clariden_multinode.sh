@@ -39,8 +39,11 @@ fi
 
 CE_ENVIRONMENT="${CE_ENVIRONMENT:-apertus-greek-clariden}"
 EDF_PATH="${HOME}/.edf/${CE_ENVIRONMENT}.toml"
+IOPS_SCRATCH_ROOT="${IOPS_SCRATCH_ROOT:-/iopsstor/scratch/cscs/${USER}}"
+CAPSTOR_SCRATCH_ROOT="${CAPSTOR_SCRATCH_ROOT:-/capstor/scratch/cscs/${USER}}"
 MODEL_PATH="${MODEL_PATH:-/capstor/store/cscs/swissai/a0140/p-skarvelis/apertus-greek-init/}"
-OUTPUT_DIR="${OUTPUT_DIR:-/capstor/store/cscs/swissai/a0140/p-skarvelis/apertus-greek-cpt}"
+OUTPUT_DIR="${OUTPUT_DIR:-${CAPSTOR_SCRATCH_ROOT}/apertus-greek-cpt}"
+PREPARED_TRAIN_DATASET_DIR="${PREPARED_TRAIN_DATASET_DIR:-}"
 RUN_NAME="${RUN_NAME:-apertus-greek-cpt-multinode}"
 STAGE_ROOT="${STAGE_ROOT:-${SCRATCH}/glossapi-tokenizer_${SLURM_JOB_ID}}"
 
@@ -89,6 +92,12 @@ SAVE_STEPS="${SAVE_STEPS:-1000}"
 SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-3}"
 LR_SCHEDULER_TYPE="${LR_SCHEDULER_TYPE:-cosine}"
 REPORT_TO="${REPORT_TO:-none}"
+BENCHMARK_MODE="${BENCHMARK_MODE:-0}"
+
+if [[ "${BENCHMARK_MODE}" == "1" && "${SMOKE_TEST}" == "1" ]]; then
+	echo "BENCHMARK_MODE=1 cannot be combined with SMOKE_TEST=1. Unset SMOKE_TEST or export SMOKE_TEST=0 before launching the benchmark." >&2
+	exit 1
+fi
 
 WARMUP_MAX_STEPS="${WARMUP_MAX_STEPS:-2000}"
 WARMUP_LEARNING_RATE="${WARMUP_LEARNING_RATE:-1e-4}"
@@ -107,6 +116,11 @@ ENGLISH_DATASET="${ENGLISH_DATASET:-epfml/FineWeb-HQ}"
 ENGLISH_CONFIG="${ENGLISH_CONFIG:-}"
 ENGLISH_SPLIT="${ENGLISH_SPLIT:-train}"
 ENGLISH_PROBABILITY="${ENGLISH_PROBABILITY:-0.1}"
+
+DEFAULT_PREPARED_TRAIN_DATASET_DIR="${IOPS_SCRATCH_ROOT}/prepared-datasets/apertus-greek-packed-${MAX_SEQ_LENGTH}"
+if [[ -z "${PREPARED_TRAIN_DATASET_DIR}" && -d "${DEFAULT_PREPARED_TRAIN_DATASET_DIR}" ]]; then
+	PREPARED_TRAIN_DATASET_DIR="${DEFAULT_PREPARED_TRAIN_DATASET_DIR}"
+fi
 
 export OCI_ANNOTATION_com__hooks__cxi__enabled=false
 export SLURM_NETWORK=disable_rdzv_get
@@ -146,6 +160,14 @@ effective_global_batch=$((PER_DEVICE_TRAIN_BATCH_SIZE * GRADIENT_ACCUMULATION_ST
 echo "Using CE environment: ${CE_ENVIRONMENT}" >&2
 echo "Using model path: ${MODEL_PATH}" >&2
 echo "Using output dir: ${OUTPUT_DIR}" >&2
+echo "Using iops scratch root: ${IOPS_SCRATCH_ROOT}" >&2
+echo "Using capstor scratch root: ${CAPSTOR_SCRATCH_ROOT}" >&2
+if [[ -n "${PREPARED_TRAIN_DATASET_DIR}" ]]; then
+	echo "Using prepared train dataset dir: ${PREPARED_TRAIN_DATASET_DIR}" >&2
+fi
+if [[ "${BENCHMARK_MODE}" == "1" ]]; then
+	echo "Benchmark mode enabled: checkpoints and final model export will be skipped." >&2
+fi
 echo "Staged workspace into ${STAGE_ROOT}" >&2
 echo "Using MASTER_ADDR=${MASTER_ADDR} MASTER_PORT=${MASTER_PORT}" >&2
 echo "Using ${SLURM_NNODES} node(s), ${NPROC_PER_NODE} process(es) per node, world_size=${EXPECTED_WORLD_SIZE}" >&2
@@ -156,6 +178,9 @@ SRUN_EXPORT="ALL"
 SRUN_EXPORT+=",STAGE_ROOT=${STAGE_ROOT}"
 SRUN_EXPORT+=",MODEL_PATH=${MODEL_PATH}"
 SRUN_EXPORT+=",OUTPUT_DIR=${OUTPUT_DIR}"
+SRUN_EXPORT+=",IOPS_SCRATCH_ROOT=${IOPS_SCRATCH_ROOT}"
+SRUN_EXPORT+=",CAPSTOR_SCRATCH_ROOT=${CAPSTOR_SCRATCH_ROOT}"
+SRUN_EXPORT+=",PREPARED_TRAIN_DATASET_DIR=${PREPARED_TRAIN_DATASET_DIR}"
 SRUN_EXPORT+=",RUN_NAME=${RUN_NAME}"
 SRUN_EXPORT+=",MASTER_ADDR=${MASTER_ADDR}"
 SRUN_EXPORT+=",MASTER_PORT=${MASTER_PORT}"
@@ -185,6 +210,7 @@ SRUN_EXPORT+=",SAVE_STEPS=${SAVE_STEPS}"
 SRUN_EXPORT+=",SAVE_TOTAL_LIMIT=${SAVE_TOTAL_LIMIT}"
 SRUN_EXPORT+=",LR_SCHEDULER_TYPE=${LR_SCHEDULER_TYPE}"
 SRUN_EXPORT+=",REPORT_TO=${REPORT_TO}"
+SRUN_EXPORT+=",BENCHMARK_MODE=${BENCHMARK_MODE}"
 SRUN_EXPORT+=",WARMUP_MAX_STEPS=${WARMUP_MAX_STEPS}"
 SRUN_EXPORT+=",WARMUP_LEARNING_RATE=${WARMUP_LEARNING_RATE}"
 SRUN_EXPORT+=",FULL_MAX_STEPS=${FULL_MAX_STEPS}"
@@ -223,11 +249,11 @@ elif [[ -f /opt/gsdg-venv/bin/activate ]]; then
 	. /opt/gsdg-venv/bin/activate
 fi
 
-export HF_HOME="${SCRATCH}/hf"
-export HF_DATASETS_CACHE="${SCRATCH}/hf_datasets"
+export HF_HOME="${HF_HOME:-${IOPS_SCRATCH_ROOT}/hf}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${IOPS_SCRATCH_ROOT}/hf_datasets}"
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
-export TRITON_CACHE_DIR="${SCRATCH}/triton/cache"
+export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-${IOPS_SCRATCH_ROOT}/triton/cache}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME}"
 export GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME}"
@@ -281,6 +307,13 @@ cpt_args=(
 	--english-split "${ENGLISH_SPLIT}"
 	--english-probability "${ENGLISH_PROBABILITY}"
 )
+
+if [[ -n "${PREPARED_TRAIN_DATASET_DIR}" ]]; then
+	cpt_args+=(--prepared-train-dataset-dir "${PREPARED_TRAIN_DATASET_DIR}")
+fi
+if [[ "${BENCHMARK_MODE}" == "1" ]]; then
+	cpt_args+=(--benchmark-mode)
+fi
 
 if [[ -n "${ENGLISH_CONFIG}" ]]; then
 	cpt_args+=(--english-config "${ENGLISH_CONFIG}")
