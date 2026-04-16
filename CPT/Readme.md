@@ -31,12 +31,13 @@ Older aligned checkpoints saved from the earlier tokenizer workflow may advertis
 
 ## Training entry point
 
-`CPT/cpt.py` is now a proper CLI training script instead of a hardcoded prototype.
-
+`CPT/cpt.py` is a CLI training script.
 Useful options:
 
 - `--model-path`: aligned checkpoint directory
 - `--output-dir`: persistent training output directory
+- `--prepared-train-dataset-dir`: optional directory of packed parquet shards produced offline by `scripts/prepare_cpt_dataset.py`
+- `--benchmark-mode`: disable checkpoint saves and final export, while still writing phase metrics JSON
 - `--smoke-test`: short validation run
 - `--skip-warmup`: skip the embedding-only phase
 - `--attn-implementation sdpa`: default backend that works without extra attention kernels
@@ -50,6 +51,42 @@ Inspect the full CLI with:
 python CPT/cpt.py --help
 ```
 
+## Prepare packed training data offline
+
+The repository includes the `scripts/prepare_cpt_dataset.py` to move tokenization and packing out of the training hot path.
+
+The script streams the configured Greek and English datasets once, tokenizes them with the extended tokenizer, inserts EOS separators between documents, packs fixed-length sequences, and writes parquet shards plus `metadata.json`.
+
+Recommended placement on Clariden:
+
+- prepared parquet shards: `/iopsstor/scratch`
+- checkpoints and model outputs: `/capstor/scratch`
+- Hugging Face and Triton caches: `/iopsstor/scratch`
+
+Example:
+
+```bash
+./run_uenv.sh python scripts/prepare_cpt_dataset.py \
+	--tokenizer-path artifacts/tokenizers/apertus-greek-v1 \
+	--output-dir /iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-packed-2048 \
+	--max-seq-length 2048 \
+	--sequences-per-shard 512 \
+	--overwrite
+```
+
+For a short benchmark corpus instead of a full pass, cap the output:
+
+```bash
+./run_uenv.sh python scripts/prepare_cpt_dataset.py \
+	--tokenizer-path artifacts/tokenizers/apertus-greek-v1 \
+	--output-dir /iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-packed-bench \
+	--max-seq-length 2048 \
+	--max-output-sequences 4096 \
+	--overwrite
+```
+
+When `--prepared-train-dataset-dir` is set, `CPT/cpt.py` loads the parquet shards from disk and skips the live streaming/tokenization path entirely. The sequence length in `metadata.json` must match the run's effective sequence length.
+
 ## Clariden launcher
 
 Use the tracked Slurm launcher in `scripts/run_apertus_greek_cpt_clariden.sh` for the single-node 4xGH200 path.
@@ -57,6 +94,12 @@ Use the tracked Slurm launcher in `scripts/run_apertus_greek_cpt_clariden.sh` fo
 The matching Container Engine template is tracked in `edf/apertus-greek-clariden.toml`.
 
 The launcher automatically sources `${REPO_ROOT}/.env` before calling `srun`, so keeping `HF_TOKEN=...` in the repo-local `.env` file is enough for the CE environment expansion.
+
+The tracked launchers now default to the following layout unless you override them:
+
+- `IOPS_SCRATCH_ROOT=/iopsstor/scratch/cscs/${USER}` for prepared datasets and runtime caches
+- `CAPSTOR_SCRATCH_ROOT=/capstor/scratch/cscs/${USER}` for `OUTPUT_DIR`
+- `PREPARED_TRAIN_DATASET_DIR=/iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-packed-${MAX_SEQ_LENGTH}` when that directory already exists
 
 ## Build the Clariden image
 
@@ -69,6 +112,7 @@ Default behavior:
 - output image: `${SCRATCH}/images/apertus-greek-aarch64.sqsh`
 - base image: `${BASE_SQSH}` when set, otherwise the script auto-detects an existing Clariden-compatible base image such as `${SCRATCH}/images/gsdg-qwen3_clariden_latest.sqsh`
 - runtime Python env inside the image: `/opt/apertus-greek-venv`
+- xIELU install: enabled by default from `git+https://github.com/nickjbrowning/XIELU`
 
 Build it with:
 
@@ -84,6 +128,15 @@ sbatch scripts/build_apertus_greek_clariden_image.sh
 ```
 
 The build script requests `128G` by default, installs only the runtime packages needed for CPT, limits `enroot create` CPU affinity, and caps `mksquashfs` to 8 workers to reduce the export-time memory spike.
+
+The build now also attempts to install `xielu` by default with `--no-build-isolation` so it compiles against the container's existing Torch build, and prints `xielu_import=OK` during the verification step when the package imports successfully.
+
+If you need to disable that install for troubleshooting, set:
+
+```bash
+export INSTALL_XIELU=0
+sbatch scripts/build_apertus_greek_clariden_image.sh
+```
 
 If you hit memory pressure during squash export, lower the worker counts further when submitting:
 
@@ -102,6 +155,13 @@ export INSTALL_FLASH_ATTN=1
 sbatch scripts/build_apertus_greek_clariden_image.sh
 ```
 
+If you want to pin a different xIELU pip source, override the package spec directly:
+
+```bash
+export XIELU_PIP_SPEC='git+https://github.com/nickjbrowning/XIELU'
+sbatch scripts/build_apertus_greek_clariden_image.sh
+```
+
 For the default repo image path, the tracked EDF already matches the produced filename. If needed, refresh your local CE definition with:
 
 ```bash
@@ -114,9 +174,24 @@ Smoke test example:
 ```bash
 export CE_ENVIRONMENT=apertus-greek-clariden
 export MODEL_PATH=${SCRATCH}/apertus-greek-init
-export OUTPUT_DIR=${SCRATCH}/apertus-greek-cpt-smoke
+export OUTPUT_DIR=/capstor/scratch/cscs/${USER}/apertus-greek-cpt-smoke
+export PREPARED_TRAIN_DATASET_DIR=/iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-packed-1024
 export SMOKE_TEST=1
 sbatch --time=01:00:00 scripts/run_apertus_greek_cpt_clariden.sh
+```
+
+Short benchmark example:
+
+```bash
+export CE_ENVIRONMENT=apertus-greek-clariden
+export MODEL_PATH=${SCRATCH}/apertus-greek-init
+export OUTPUT_DIR=/capstor/scratch/cscs/${USER}/apertus-greek-cpt-bench
+export PREPARED_TRAIN_DATASET_DIR=/iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-packed-2048
+export BENCHMARK_MODE=1
+export SMOKE_TEST=0
+export SKIP_WARMUP=1
+export FULL_MAX_STEPS=50
+sbatch --time=00:30:00 scripts/run_apertus_greek_cpt_clariden.sh
 ```
 
 Production-length example:
@@ -124,7 +199,8 @@ Production-length example:
 ```bash
 export CE_ENVIRONMENT=apertus-greek-clariden
 export MODEL_PATH=${SCRATCH}/apertus-greek-init
-export OUTPUT_DIR=${SCRATCH}/apertus-greek-cpt
+export OUTPUT_DIR=/capstor/scratch/cscs/${USER}/apertus-greek-cpt
+export PREPARED_TRAIN_DATASET_DIR=/iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-packed-2048
 export SMOKE_TEST=0
 sbatch --time=12:00:00 scripts/run_apertus_greek_cpt_clariden.sh
 ```
@@ -134,7 +210,8 @@ Multi-node production example on 4 Clariden nodes / 16 GPUs:
 ```bash
 export CE_ENVIRONMENT=apertus-greek-clariden
 export MODEL_PATH=${SCRATCH}/apertus-greek-init
-export OUTPUT_DIR=${SCRATCH}/apertus-greek-cpt-multinode
+export OUTPUT_DIR=/capstor/scratch/cscs/${USER}/apertus-greek-cpt-multinode
+export PREPARED_TRAIN_DATASET_DIR=/iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-packed-2048
 export SMOKE_TEST=0
 sbatch --nodes=4 --time=12:00:00 scripts/run_apertus_greek_cpt_clariden_multinode.sh
 ```
@@ -173,6 +250,8 @@ Useful overrides for the launcher:
 - `SMOKE_PER_DEVICE_TRAIN_BATCH_SIZE=1`
 - `SMOKE_GRADIENT_ACCUMULATION_STEPS=1`
 - `SMOKE_MAX_SEQ_LENGTH=1024`
+- `PREPARED_TRAIN_DATASET_DIR=/iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-packed-2048`
+- `BENCHMARK_MODE=1`
 - `ATTN_IMPLEMENTATION=sdpa`
 - `ATTN_IMPLEMENTATION=flash_attention_2`
 - `OVERWRITE_OUTPUT_DIR=1`
@@ -184,6 +263,8 @@ Useful overrides for the multi-node launcher:
 - `TARGET_GLOBAL_BATCH_SIZE=256`
 - `PER_DEVICE_TRAIN_BATCH_SIZE=1`
 - `GRADIENT_ACCUMULATION_STEPS=16`
+- `PREPARED_TRAIN_DATASET_DIR=/iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-packed-2048`
+- `BENCHMARK_MODE=1`
 - `MASTER_PORT=29501`
 - `NPROC_PER_NODE=4`
 
@@ -194,7 +275,7 @@ python -m torch.distributed.run --standalone --nproc_per_node=4 CPT/cpt.py ...
 ```
 
 The default attention backend is now `sdpa`, which works without extra attention kernels in the image. Use `ATTN_IMPLEMENTATION=flash_attention_2` only when the container actually includes `flash-attn`.
-The launcher also pins `TRITON_CACHE_DIR` under `${SCRATCH}` so Triton does not try to cache autotune state under an unavailable home-directory path inside the container.
+The launcher also pins `HF_HOME`, `HF_DATASETS_CACHE`, and `TRITON_CACHE_DIR` under `/iopsstor/scratch/cscs/${USER}` so active data and compiler caches stay on the fast scratch tier.
 It also sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` by default to reduce allocator fragmentation on the first backward pass.
 
 On the Clariden `normal` partition, the maximum walltime is `12:00:00`. The tracked Slurm script now uses that as its default, and you can request a shorter walltime with `sbatch --time=...`.
@@ -209,6 +290,22 @@ The training script writes:
 - `OUTPUT_DIR/warmup/`: warm-up phase checkpoints
 - `OUTPUT_DIR/full/`: full CPT phase checkpoints
 - `OUTPUT_DIR/final/`: final model and tokenizer artifacts
+
+Each phase directory also gets `phase_metrics.json` with:
+
+- world size
+- effective global batch size
+- effective sequence length
+- phase token budget
+- cluster tokens per second
+- tokens per second per GPU
+
+In `--benchmark-mode`, the phase metrics are still written, but checkpoint saves and `OUTPUT_DIR/final/` are skipped.
+
+The offline dataset preparation script writes:
+
+- `PREPARED_TRAIN_DATASET_DIR/metadata.json`: tokenizer path, dataset mix, sequence length, and shard inventory
+- `PREPARED_TRAIN_DATASET_DIR/*.parquet`: packed `input_ids` shards ready for direct loading in `CPT/cpt.py`
 
 The script validates at startup that:
 
