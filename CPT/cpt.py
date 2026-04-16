@@ -11,7 +11,6 @@ from datasets import interleave_datasets, load_dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    DataCollatorForLanguageModeling,
     PreTrainedTokenizerFast,
     Trainer,
     TrainingArguments,
@@ -52,6 +51,14 @@ def parse_args() -> argparse.Namespace:
         help="Logical run name recorded in the Trainer state.",
     )
     parser.add_argument(
+        "--prepared-train-dataset-dir",
+        help=(
+            "Optional directory containing prepared parquet shards produced by "
+            "scripts/prepare_cpt_dataset.py. When set, CPT loads tokenized packed sequences "
+            "from disk instead of streaming and tokenizing raw text on the fly."
+        ),
+    )
+    parser.add_argument(
         "--trust-remote-code",
         action="store_true",
         help="Pass trust_remote_code=True when loading the checkpoint tokenizer/model.",
@@ -84,6 +91,14 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Allow Trainer phase directories to be reused when they already contain checkpoints.",
+    )
+    parser.add_argument(
+        "--benchmark-mode",
+        action="store_true",
+        help=(
+            "Run a short throughput benchmark without writing checkpoints or a final model. "
+            "Phase metrics are still written to JSON for analysis."
+        ),
     )
     parser.add_argument(
         "--seed",
@@ -336,6 +351,17 @@ def validate_args(args: argparse.Namespace) -> None:
     output_dir = Path(args.output_dir)
     if model_path.is_absolute() and output_dir.is_absolute() and model_path == output_dir:
         raise SystemExit("--output-dir must differ from --model-path so the aligned checkpoint is not overwritten.")
+    if args.prepared_train_dataset_dir:
+        prepared_dir = Path(args.prepared_train_dataset_dir)
+        if not prepared_dir.exists() or not prepared_dir.is_dir():
+            raise SystemExit(
+                f"--prepared-train-dataset-dir must point to an existing directory, got {prepared_dir}."
+            )
+    if args.benchmark_mode and args.smoke_test:
+        raise SystemExit(
+            "--benchmark-mode cannot be combined with --smoke-test. "
+            "Unset SMOKE_TEST or run a non-benchmark smoke test instead."
+        )
 
 
 def resolve_torch_dtype(dtype_name: str):
@@ -401,6 +427,12 @@ def effective_max_seq_length(args: argparse.Namespace) -> int:
     return args.max_seq_length
 
 
+def train_dataset_mode(args: argparse.Namespace) -> str:
+    if args.prepared_train_dataset_dir:
+        return "prepared"
+    return "streaming"
+
+
 def load_streaming_dataset(dataset_name: str, dataset_config: str | None, split: str):
     dataset_kwargs: Dict[str, Any] = {
         "path": dataset_name,
@@ -412,7 +444,43 @@ def load_streaming_dataset(dataset_name: str, dataset_config: str | None, split:
     return load_dataset(**dataset_kwargs)
 
 
+def load_prepared_dataset_metadata(prepared_dir: Path) -> Dict[str, Any] | None:
+    metadata_path = prepared_dir / "metadata.json"
+    if not metadata_path.exists():
+        return None
+    return json.loads(metadata_path.read_text(encoding="utf-8"))
+
+
+def load_prepared_training_dataset(args: argparse.Namespace):
+    prepared_dir = Path(args.prepared_train_dataset_dir)
+    shard_paths = sorted(prepared_dir.glob("*.parquet"))
+    if not shard_paths:
+        raise SystemExit(f"No parquet shards were found under {prepared_dir}.")
+
+    metadata = load_prepared_dataset_metadata(prepared_dir)
+    if metadata is not None:
+        prepared_seq_length = metadata.get("sequence_length")
+        effective_seq_length = effective_max_seq_length(args)
+        if prepared_seq_length is not None and int(prepared_seq_length) != effective_seq_length:
+            raise SystemExit(
+                "Prepared dataset sequence length mismatch: "
+                f"metadata.json says {prepared_seq_length}, but the current run expects {effective_seq_length}."
+            )
+
+    rank_zero_print(
+        f"Loading prepared training dataset from {prepared_dir} with {len(shard_paths)} parquet shard(s)."
+    )
+    return load_dataset(
+        "parquet",
+        data_files=[str(path) for path in shard_paths],
+        split="train",
+    )
+
+
 def build_training_dataset(args: argparse.Namespace, tokenizer):
+    if args.prepared_train_dataset_dir:
+        return load_prepared_training_dataset(args)
+
     greek_ds = load_streaming_dataset(args.greek_dataset, args.greek_config, args.greek_split)
 
     datasets = []
@@ -449,6 +517,24 @@ def build_training_dataset(args: argparse.Namespace, tokenizer):
     if getattr(filtered_ds, "features", None):
         map_kwargs["remove_columns"] = list(filtered_ds.features.keys())
     return filtered_ds.map(**map_kwargs)
+
+
+def causal_lm_data_collator(features: Sequence[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+    input_ids = torch.tensor([feature["input_ids"] for feature in features], dtype=torch.long)
+    batch = {
+        "input_ids": input_ids,
+        "labels": input_ids.clone(),
+    }
+
+    if "attention_mask" in features[0]:
+        batch["attention_mask"] = torch.tensor(
+            [feature["attention_mask"] for feature in features],
+            dtype=torch.long,
+        )
+    else:
+        batch["attention_mask"] = torch.ones_like(input_ids)
+
+    return batch
 
 
 def load_tokenizer(args: argparse.Namespace):
@@ -616,6 +702,36 @@ def effective_batch_settings(args: argparse.Namespace) -> Dict[str, int]:
     }
 
 
+def effective_global_batch_size(args: argparse.Namespace, current_world_size: int | None = None) -> int:
+    if current_world_size is None:
+        current_world_size = world_size()
+    batch_settings = effective_batch_settings(args)
+    return (
+        batch_settings["per_device_train_batch_size"]
+        * batch_settings["gradient_accumulation_steps"]
+        * current_world_size
+    )
+
+
+def phase_token_budget(args: argparse.Namespace, max_steps: int, current_world_size: int | None = None) -> int:
+    return max_steps * effective_global_batch_size(args, current_world_size) * effective_max_seq_length(args)
+
+
+def write_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def checkpoint_global_step(checkpoint_path: Path | None) -> int:
+    if checkpoint_path is None:
+        return 0
+    prefix = "checkpoint-"
+    if checkpoint_path.name.startswith(prefix):
+        suffix = checkpoint_path.name[len(prefix) :]
+        if suffix.isdigit():
+            return int(suffix)
+    return 0
+
+
 def training_arguments(
     args: argparse.Namespace,
     phase_name: str,
@@ -627,6 +743,7 @@ def training_arguments(
     logging_steps = max(1, min(args.logging_steps, max_steps))
     save_steps = max(1, min(args.save_steps, max_steps))
     batch_settings = effective_batch_settings(args)
+    save_strategy = "no" if args.benchmark_mode else "steps"
 
     training_kwargs: Dict[str, Any] = {
         "output_dir": str(phase_output_dir),
@@ -640,7 +757,7 @@ def training_arguments(
         "bf16": args.bf16,
         "logging_strategy": "steps",
         "logging_steps": logging_steps,
-        "save_strategy": "steps",
+        "save_strategy": save_strategy,
         "save_steps": save_steps,
         "save_total_limit": args.save_total_limit,
         "lr_scheduler_type": args.lr_scheduler_type,
@@ -659,6 +776,48 @@ def training_arguments(
     if world_size() > 1:
         training_kwargs["ddp_find_unused_parameters"] = False
     return TrainingArguments(**training_kwargs)
+
+
+def save_phase_metrics(
+    args: argparse.Namespace,
+    phase_name: str,
+    phase_output_dir: Path,
+    metrics: Dict[str, Any],
+    max_steps: int,
+    steps_completed: int,
+    current_world_size: int,
+) -> None:
+    if not is_world_process_zero():
+        return
+
+    train_runtime = metrics.get("train_runtime", 0.0) or 0.0
+    phase_tokens = phase_token_budget(args, steps_completed, current_world_size)
+    cluster_tokens_per_second = 0.0
+    tokens_per_second_per_gpu = 0.0
+    if train_runtime > 0:
+        cluster_tokens_per_second = phase_tokens / train_runtime
+        if current_world_size > 0:
+            tokens_per_second_per_gpu = cluster_tokens_per_second / current_world_size
+
+    payload = {
+        "phase_name": phase_name,
+        "train_dataset_mode": train_dataset_mode(args),
+        "world_size": current_world_size,
+        "effective_global_batch_size": effective_global_batch_size(args, current_world_size),
+        "effective_max_seq_length": effective_max_seq_length(args),
+        "phase_max_steps": max_steps,
+        "steps_completed": steps_completed,
+        "phase_token_budget": phase_tokens,
+        "cluster_tokens_per_second": cluster_tokens_per_second,
+        "tokens_per_second_per_gpu": tokens_per_second_per_gpu,
+        "metrics": metrics,
+    }
+    write_json(phase_output_dir / "phase_metrics.json", payload)
+    rank_zero_print(
+        f"Completed phase '{phase_name}': train_runtime={train_runtime:.2f}s, "
+        f"cluster_tokens_per_second={cluster_tokens_per_second:.2f}, "
+        f"tokens_per_second_per_gpu={tokens_per_second_per_gpu:.2f}."
+    )
 
 
 def run_phase(
@@ -698,8 +857,10 @@ def run_phase(
             warmup_steps=warmup_steps,
         ),
         train_dataset=train_dataset,
-        data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
+        data_collator=causal_lm_data_collator,
     )
+
+    current_world_size = world_size()
 
     rank_zero_print(
         f"Starting phase '{phase_name}' with max_steps={max_steps}, learning_rate={learning_rate}, "
@@ -707,10 +868,22 @@ def run_phase(
     )
     if resume_checkpoint:
         rank_zero_print(f"Resuming phase '{phase_name}' from {resume_checkpoint}.")
-        trainer.train(resume_from_checkpoint=resume_checkpoint)
+        train_result = trainer.train(resume_from_checkpoint=resume_checkpoint)
     else:
-        trainer.train()
-    trainer.save_state()
+        train_result = trainer.train()
+    if not args.benchmark_mode:
+        trainer.save_state()
+    resume_global_step = checkpoint_global_step(resume_checkpoint)
+    steps_completed = max(trainer.state.global_step - resume_global_step, 0)
+    save_phase_metrics(
+        args=args,
+        phase_name=phase_name,
+        phase_output_dir=phase_output_dir,
+        metrics=train_result.metrics,
+        max_steps=max_steps,
+        steps_completed=steps_completed,
+        current_world_size=current_world_size,
+    )
     maybe_barrier()
     return trainer
 
@@ -722,13 +895,10 @@ def save_run_config(args: argparse.Namespace, current_world_size: int, tokenizer
     output_dir = Path(args.output_dir)
     ensure_output_dir(output_dir)
     batch_settings = effective_batch_settings(args)
-    effective_global_batch = (
-        batch_settings["per_device_train_batch_size"]
-        * batch_settings["gradient_accumulation_steps"]
-        * current_world_size
-    )
+    effective_global_batch = effective_global_batch_size(args, current_world_size)
     payload = {
         "args": vars(args),
+        "train_dataset_mode": train_dataset_mode(args),
         "world_size": current_world_size,
         "effective_global_batch_size": effective_global_batch,
         "effective_batch_settings": batch_settings,
@@ -767,13 +937,10 @@ def main() -> None:
     save_run_config(args, current_world_size, len(tokenizer))
 
     batch_settings = effective_batch_settings(args)
-    effective_global_batch = (
-        batch_settings["per_device_train_batch_size"]
-        * batch_settings["gradient_accumulation_steps"]
-        * current_world_size
-    )
+    effective_global_batch = effective_global_batch_size(args, current_world_size)
     rank_zero_print(
         "Loaded aligned checkpoint successfully. "
+        f"train_dataset_mode={train_dataset_mode(args)}, "
         f"world_size={current_world_size}, effective_global_batch_size={effective_global_batch}, "
         f"per_device_train_batch_size={batch_settings['per_device_train_batch_size']}, "
         f"gradient_accumulation_steps={batch_settings['gradient_accumulation_steps']}, "
@@ -813,6 +980,10 @@ def main() -> None:
 
     if trainer is None:
         raise SystemExit("No training phase ran. Check the configured step counts.")
+
+    if args.benchmark_mode:
+        rank_zero_print("Benchmark mode enabled: skipping final checkpoint export.")
+        return
 
     save_final_checkpoint(trainer, tokenizer, args.output_dir)
     rank_zero_print(f"Saved final CPT checkpoint to {Path(args.output_dir) / 'final'}")
