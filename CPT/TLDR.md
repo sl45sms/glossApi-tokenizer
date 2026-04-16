@@ -88,8 +88,6 @@ The numbers to compare between the 4-GPU and 16-GPU runs are these fields inside
 
 # production run on 4 nodes
 ```
-cd /users/p-skarvelis/glossApi-Tokenizer
-
 export CE_ENVIRONMENT=apertus-greek-clariden
 export MODEL_PATH=/iopsstor/scratch/cscs/${USER}/apertus-greek-init
 export OUTPUT_DIR=/capstor/scratch/cscs/${USER}/apertus-greek-cpt-prod-xielu-sdpa-nogc
@@ -105,3 +103,5 @@ export SKIP_WARMUP=0
 
 sbatch --nodes=4 --time=12:00:00 scripts/run_apertus_greek_cpt_clariden_multinode.sh
 ```
+* Use the same OUTPUT_DIR on rerun.
+  If you keep the same output directory, warmup resumes from output_dir/warmup and full resumes from output_dir/full. If warmup is already complete, the code loads that checkpoint and skips warmup cleanly before moving on.
