@@ -67,12 +67,15 @@ OUT_SQSH="${OUT_SQSH:-${SCRATCH}/images/apertus-greek-aarch64.sqsh}"
 NAME="${NAME:-apertus-greek-${SLURM_JOB_ID:-manual}}"
 ENROOT_CREATE_PROCS="${ENROOT_CREATE_PROCS:-8}"
 MKSQUASHFS_PROCS="${MKSQUASHFS_PROCS:-8}"
+INSTALL_XIELU="${INSTALL_XIELU:-1}"
+XIELU_PIP_SPEC="${XIELU_PIP_SPEC:-git+https://github.com/nickjbrowning/XIELU}"
 
 log "Using BASE_SQSH=${BASE_SQSH}"
 log "Writing OUT_SQSH=${OUT_SQSH}"
 log "Enroot container name: ${NAME}"
 log "Using ENROOT_CREATE_PROCS=${ENROOT_CREATE_PROCS}"
 log "Using MKSQUASHFS_PROCS=${MKSQUASHFS_PROCS}"
+log "Using INSTALL_XIELU=${INSTALL_XIELU}"
 
 build_cpu_list() {
 	local limit="$1"
@@ -129,9 +132,13 @@ tar -C "${REPO_ROOT}" -cz requirements.txt requirements-clariden-runtime.txt CPT
 
 	python -m pip install --upgrade pip
 	python -m pip install -r /workspace/requirements-clariden-runtime.txt
+	if [[ "${INSTALL_XIELU:-1}" == "1" ]]; then
+		python -m pip install --upgrade wheel cmake ninja "packaging<=25.0"
+		python -m pip install --no-build-isolation "${XIELU_PIP_SPEC:-git+https://github.com/nickjbrowning/XIELU}"
+	fi
 
 	if [[ "${INSTALL_FLASH_ATTN:-0}" == "1" ]]; then
-		python -m pip install --upgrade wheel cmake ninja packaging
+		python -m pip install --upgrade wheel cmake ninja "packaging<=25.0"
 		python -m pip install --no-build-isolation flash-attn
 	fi
 
@@ -145,6 +152,13 @@ print("torch_version=" + torch.__version__)
 print("transformers_version=" + transformers.__version__)
 print("datasets_version=" + datasets.__version__)
 print("accelerate_version=" + accelerate.__version__)
+
+try:
+	import xielu  # type: ignore
+except Exception as exc:
+	print("xielu_import=FAILED:" + repr(exc))
+else:
+	print("xielu_import=OK")
 PY
 	'
 
