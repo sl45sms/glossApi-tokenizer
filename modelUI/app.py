@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import concurrent.futures
 import html
 import inspect
 import json
@@ -22,6 +23,7 @@ TEXTBOX_SUPPORTS_SHOW_COPY_BUTTON = "show_copy_button" in TEXTBOX_SIGNATURE.para
 BLOCKS_SUPPORTS_CSS = "css" in inspect.signature(gr.Blocks.__init__).parameters
 BLOCKS_LAUNCH_SUPPORTS_SHOW_API = "show_api" in inspect.signature(gr.Blocks.launch).parameters
 
+DEFAULT_BASE_MODEL_REF = "swiss-ai/Apertus-8B-Instruct-2509"
 DEFAULT_CAPSTOR_MODEL_PATH = "/capstor/store/cscs/swissai/a0140/p-skarvelis/apertus-greek-cpt/final"
 DEFAULT_MAX_NEW_TOKENS = 256
 DEFAULT_TEMPERATURE = 0.0
@@ -148,6 +150,20 @@ body, .gradio-container {
     background:
         linear-gradient(180deg, rgba(197, 114, 61, 0.08), transparent 42%),
         var(--surface-1);
+}
+
+.base-lane {
+    background:
+        linear-gradient(180deg, rgba(12, 124, 89, 0.08), transparent 42%),
+        var(--surface-1);
+    border-color: rgba(12, 124, 89, 0.26);
+}
+
+.trained-lane {
+    background:
+        linear-gradient(180deg, rgba(197, 114, 61, 0.08), transparent 42%),
+        var(--surface-1);
+    border-color: rgba(197, 114, 61, 0.24);
 }
 
 .section-title {
@@ -400,10 +416,22 @@ def discover_default_model() -> str:
     return str(candidates[0])
 
 
-def default_device() -> str:
+def discover_base_model() -> str:
+    return os.environ.get("APERTUS_MODEL_UI_BASE_MODEL", DEFAULT_BASE_MODEL_REF)
+
+
+def default_device_for(index: int) -> str:
     if torch.cuda.is_available():
-        return "cuda:0"
+        device_count = torch.cuda.device_count()
+        if index < device_count:
+            return f"cuda:{index}"
+        if device_count > 0:
+            return "cuda:0"
     return "cpu"
+
+
+def default_device() -> str:
+    return default_device_for(0)
 
 
 def default_dtype(device: str) -> str:
@@ -526,14 +554,27 @@ def render_history(entries: List[Dict[str, str]]) -> str:
 
     cards = []
     for entry in reversed(entries):
+        responses = entry.get("responses") or [
+            {
+                "label": "Response",
+                "text": entry.get("response", ""),
+            }
+        ]
+        response_sections = []
+        for response in responses:
+            response_sections.append(
+                "<div class='history-label'>"
+                f"{html.escape(response['label'])}"
+                "</div>"
+                f"<pre>{html.escape(response['text'])}</pre>"
+            )
         cards.append(
             "<div class='history-card'>"
             f"<div class='history-head'>Run {html.escape(entry['index'])} - {html.escape(entry['label'])}</div>"
             f"<div class='meta-strip'>{html.escape(entry['summary'])}</div>"
             "<div class='history-label'>Prompt</div>"
             f"<pre>{html.escape(entry['prompt'])}</pre>"
-            "<div class='history-label'>Response</div>"
-            f"<pre>{html.escape(entry['response'])}</pre>"
+            f"{''.join(response_sections)}"
             "</div>"
         )
     return "<div class='history-stack'>" + "".join(cards) + "</div>"
@@ -673,6 +714,38 @@ def build_status_message(runtime_label: str, message: str) -> str:
     return f"<div class='status-strip'><strong>{html.escape(runtime_label)}</strong> {message}</div>"
 
 
+def run_runtime_request(
+    runtime: ModelRuntime,
+    prompt: str,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+) -> Dict[str, str]:
+    try:
+        result = runtime.generate(prompt, max_new_tokens, temperature, top_p)
+        tokens_per_second = result.token_count / result.seconds if result.seconds > 0 else 0.0
+        return {
+            "response_text": result.text,
+            "status": build_status_message(
+                runtime.label,
+                f"completed in {result.seconds:.2f}s on {html.escape(result.device)} for "
+                f"{result.token_count} new tokens ({tokens_per_second:.1f} tok/s).",
+            ),
+            "summary": (
+                f"{runtime.label}: {result.token_count} tokens | {result.seconds:.2f}s | "
+                f"{tokens_per_second:.1f} tok/s | {result.device}"
+            ),
+            "runtime_label": runtime.label,
+        }
+    except Exception as exc:
+        return {
+            "response_text": f"[ERROR]\n{exc}",
+            "status": build_status_message(runtime.label, f"failed: {html.escape(str(exc))}"),
+            "summary": f"{runtime.label}: error | {exc}",
+            "runtime_label": runtime.label,
+        }
+
+
 def run_generation(
     runtime: ModelRuntime,
     prompt: str,
@@ -687,34 +760,103 @@ def run_generation(
         raise gr.Error("Write a prompt first.")
 
     next_history = list(history or [])
-    try:
-        result = runtime.generate(prompt, max_new_tokens, temperature, top_p)
-        tokens_per_second = result.token_count / result.seconds if result.seconds > 0 else 0.0
-        status = build_status_message(
-            runtime.label,
-            f"completed in {result.seconds:.2f}s on {html.escape(result.device)} for "
-            f"{result.token_count} new tokens ({tokens_per_second:.1f} tok/s).",
-        )
-        response_text = result.text
-        summary = (
-            f"{label} | {result.token_count} tokens | {result.seconds:.2f}s | "
-            f"{tokens_per_second:.1f} tok/s | {result.device}"
-        )
-    except Exception as exc:
-        response_text = f"[ERROR]\n{exc}"
-        status = build_status_message(runtime.label, f"failed: {html.escape(str(exc))}")
-        summary = f"{label} | error | {exc}"
+    result = run_runtime_request(runtime, prompt, max_new_tokens, temperature, top_p)
+    response_text = result["response_text"]
+    status = result["status"]
+    summary = f"{label} | {result['summary']}"
 
     next_history.append(
         {
             "index": str(len(next_history) + 1),
             "label": label,
             "prompt": prompt,
-            "response": response_text,
             "summary": summary,
+            "responses": [
+                {
+                    "label": runtime.label,
+                    "text": response_text,
+                }
+            ],
         }
     )
     return response_text, status, next_history, render_history(next_history)
+
+
+def can_compare_in_parallel(base_runtime: ModelRuntime, trained_runtime: ModelRuntime) -> bool:
+    base_device = base_runtime.preferred_device or "auto"
+    trained_device = trained_runtime.preferred_device or "auto"
+    if "auto" in {base_device, trained_device}:
+        return False
+    if base_device == trained_device:
+        return False
+    return True
+
+
+def run_comparison(
+    base_runtime: ModelRuntime,
+    trained_runtime: ModelRuntime,
+    prompt: str,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    history: List[Dict[str, str]],
+    label: str,
+):
+    prompt = prompt.strip()
+    if not prompt:
+        raise gr.Error("Write a prompt first.")
+
+    next_history = list(history or [])
+    if can_compare_in_parallel(base_runtime, trained_runtime):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            base_future = executor.submit(
+                run_runtime_request,
+                base_runtime,
+                prompt,
+                max_new_tokens,
+                temperature,
+                top_p,
+            )
+            trained_future = executor.submit(
+                run_runtime_request,
+                trained_runtime,
+                prompt,
+                max_new_tokens,
+                temperature,
+                top_p,
+            )
+            base_result = base_future.result()
+            trained_result = trained_future.result()
+    else:
+        base_result = run_runtime_request(base_runtime, prompt, max_new_tokens, temperature, top_p)
+        trained_result = run_runtime_request(trained_runtime, prompt, max_new_tokens, temperature, top_p)
+
+    next_history.append(
+        {
+            "index": str(len(next_history) + 1),
+            "label": label,
+            "prompt": prompt,
+            "summary": f"{label} | {base_result['summary']} || {trained_result['summary']}",
+            "responses": [
+                {
+                    "label": base_runtime.label,
+                    "text": base_result["response_text"],
+                },
+                {
+                    "label": trained_runtime.label,
+                    "text": trained_result["response_text"],
+                },
+            ],
+        }
+    )
+
+    return (
+        base_result["response_text"],
+        trained_result["response_text"],
+        base_result["status"] + trained_result["status"],
+        next_history,
+        render_history(next_history),
+    )
 
 
 def selected_probe_prompt(title: str) -> str:
@@ -743,7 +885,30 @@ def run_selected_probe(
 
 
 def clear_current_view():
-    return "", ""
+    return "", "", ""
+
+
+def run_selected_probe_comparison(
+    base_runtime: ModelRuntime,
+    trained_runtime: ModelRuntime,
+    title: str,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    history: List[Dict[str, str]],
+):
+    prompt = selected_probe_prompt(title)
+    base_text, trained_text, status, next_history, history_html = run_comparison(
+        base_runtime=base_runtime,
+        trained_runtime=trained_runtime,
+        prompt=prompt,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        history=history,
+        label=title,
+    )
+    return prompt, base_text, trained_text, status, next_history, history_html
 
 
 def clear_history():
@@ -751,7 +916,15 @@ def clear_history():
 
 
 def build_app(args: argparse.Namespace):
-    runtime = ModelRuntime(
+    base_runtime = ModelRuntime(
+        label=args.base_label,
+        model_ref=args.base_model,
+        preferred_device=args.base_device,
+        dtype_name=args.base_dtype,
+        trust_remote_code=args.trust_remote_code,
+        attn_implementation=args.attn_implementation,
+    )
+    trained_runtime = ModelRuntime(
         label=args.model_label,
         model_ref=args.model_path,
         preferred_device=args.device,
@@ -762,21 +935,24 @@ def build_app(args: argparse.Namespace):
 
     hero_html = f"""
     <div class='hero-panel'>
-        <div class='lane-chip'>Single-model CPT evaluation</div>
+        <div class='lane-chip'>Base vs CPT evaluation</div>
         <h1>Apertus CPT Console</h1>
         <p>
-            This UI is focused on post-training inspection of one tokenizer-aligned CPT checkpoint.
-            The preset probes are meant to stress Greek fluency, instruction following, structured output,
-            English retention, bilingual switching, and uncertainty handling. The freeform prompt box stays editable,
-            so you can replace any preset with your own test immediately.
+            This UI compares the original Apertus base model against the tokenizer-aligned CPT checkpoint.
+            The preset probes stress Greek fluency, instruction following, structured output,
+            English retention, bilingual switching, and uncertainty handling. The same prompt can be sent to both lanes,
+            and the freeform prompt box stays editable so you can replace any preset immediately.
         </p>
         <div class='meta-grid'>
             <div class='meta-card'>
-                <strong>Checkpoint</strong>
-                <div class='meta-strip'>{format_path(args.model_path)}</div>
+                <strong>Base model</strong>
+                <div class='meta-strip'>{format_path(args.base_model)}</div>
+                <div class='meta-strip'>device: {format_path(args.base_device)}</div>
+                <div class='meta-strip'>dtype: {format_path(args.base_dtype)}</div>
             </div>
             <div class='meta-card'>
-                <strong>Runtime</strong>
+                <strong>Trained checkpoint</strong>
+                <div class='meta-strip'>{format_path(args.model_path)}</div>
                 <div class='meta-strip'>device: {format_path(args.device)}</div>
                 <div class='meta-strip'>dtype: {format_path(args.dtype)}</div>
                 <div class='meta-strip'>attention: {format_path(args.attn_implementation or 'default')}</div>
@@ -785,7 +961,7 @@ def build_app(args: argparse.Namespace):
                 <strong>Serve endpoint</strong>
                 <div class='meta-strip'>{format_path(args.host)}:{args.port}</div>
                 <div class='meta-strip'>first request loads weights and can take a while</div>
-                <div class='meta-strip'>runs are stateless; the log below is not sent back to the model</div>
+                <div class='meta-strip'>compare runs use parallel generation only when the two lanes target different explicit devices</div>
             </div>
         </div>
     </div>
@@ -813,7 +989,7 @@ def build_app(args: argparse.Namespace):
                         probe_details = gr.Markdown(value=render_probe_details(DEFAULT_SCENARIO_TITLE))
                         with gr.Row():
                             load_probe_button = gr.Button("Load selected probe")
-                            run_probe_button = gr.Button("Run selected probe", variant="secondary")
+                            run_probe_button = gr.Button("Compare selected probe", variant="secondary")
                         gr.HTML(render_probe_library())
 
                 with gr.Column(scale=8):
@@ -826,7 +1002,9 @@ def build_app(args: argparse.Namespace):
                             placeholder="Write a freeform prompt or load one of the preset probes...",
                         )
                         with gr.Row():
-                            ask_button = gr.Button("Ask model", variant="primary")
+                            compare_button = gr.Button("Compare both models", variant="primary")
+                            ask_trained_button = gr.Button("Run trained only", variant="secondary")
+                            ask_base_button = gr.Button("Run base only")
                             clear_current_button = gr.Button("Clear current view")
 
                         with gr.Accordion("Generation settings", open=False):
@@ -853,11 +1031,21 @@ def build_app(args: argparse.Namespace):
                                     label="Top-p",
                                 )
 
-                        answer_box = gr.Textbox(
-                            label="Model answer",
-                            lines=18,
-                            **textbox_copy_kwargs(),
-                        )
+                        with gr.Row(equal_height=True):
+                            with gr.Column(elem_classes=["panel-card", "base-lane"]):
+                                gr.HTML("<div class='lane-chip'>Original checkpoint</div><div class='section-title'>Apertus base</div>")
+                                base_answer_box = gr.Textbox(
+                                    label=args.base_label,
+                                    lines=18,
+                                    **textbox_copy_kwargs(),
+                                )
+                            with gr.Column(elem_classes=["panel-card", "trained-lane"]):
+                                gr.HTML("<div class='lane-chip'>After CPT</div><div class='section-title'>Trained lane</div>")
+                                trained_answer_box = gr.Textbox(
+                                    label=args.model_label,
+                                    lines=18,
+                                    **textbox_copy_kwargs(),
+                                )
                         status_box = gr.HTML()
 
             with gr.Group(elem_classes=["panel-card"]):
@@ -869,8 +1057,9 @@ def build_app(args: argparse.Namespace):
         probe_selector.change(fn=render_probe_details, inputs=[probe_selector], outputs=[probe_details])
         load_probe_button.click(fn=selected_probe_prompt, inputs=[probe_selector], outputs=[prompt_box])
         run_probe_button.click(
-            fn=lambda title, tokens, temp, nucleus, history: run_selected_probe(
-                runtime,
+            fn=lambda title, tokens, temp, nucleus, history: run_selected_probe_comparison(
+                base_runtime,
+                trained_runtime,
                 title,
                 int(tokens),
                 float(temp),
@@ -878,22 +1067,49 @@ def build_app(args: argparse.Namespace):
                 history,
             ),
             inputs=[probe_selector, max_new_tokens, temperature, top_p, history_state],
-            outputs=[prompt_box, answer_box, status_box, history_state, history_html],
+            outputs=[prompt_box, base_answer_box, trained_answer_box, status_box, history_state, history_html],
         )
-        ask_button.click(
-            fn=lambda prompt, tokens, temp, nucleus, history: run_generation(
-                runtime=runtime,
+        compare_button.click(
+            fn=lambda prompt, tokens, temp, nucleus, history: run_comparison(
+                base_runtime=base_runtime,
+                trained_runtime=trained_runtime,
                 prompt=prompt,
                 max_new_tokens=int(tokens),
                 temperature=float(temp),
                 top_p=float(nucleus),
                 history=history,
-                label="Freeform prompt",
+                label="Freeform comparison",
             ),
             inputs=[prompt_box, max_new_tokens, temperature, top_p, history_state],
-            outputs=[answer_box, status_box, history_state, history_html],
+            outputs=[base_answer_box, trained_answer_box, status_box, history_state, history_html],
         )
-        clear_current_button.click(fn=clear_current_view, outputs=[answer_box, status_box])
+        ask_trained_button.click(
+            fn=lambda prompt, tokens, temp, nucleus, history: run_generation(
+                runtime=trained_runtime,
+                prompt=prompt,
+                max_new_tokens=int(tokens),
+                temperature=float(temp),
+                top_p=float(nucleus),
+                history=history,
+                label="Freeform prompt | trained",
+            ),
+            inputs=[prompt_box, max_new_tokens, temperature, top_p, history_state],
+            outputs=[trained_answer_box, status_box, history_state, history_html],
+        )
+        ask_base_button.click(
+            fn=lambda prompt, tokens, temp, nucleus, history: run_generation(
+                runtime=base_runtime,
+                prompt=prompt,
+                max_new_tokens=int(tokens),
+                temperature=float(temp),
+                top_p=float(nucleus),
+                history=history,
+                label="Freeform prompt | base",
+            ),
+            inputs=[prompt_box, max_new_tokens, temperature, top_p, history_state],
+            outputs=[base_answer_box, status_box, history_state, history_html],
+        )
+        clear_current_button.click(fn=clear_current_view, outputs=[base_answer_box, trained_answer_box, status_box])
         clear_history_button.click(fn=clear_history, outputs=[history_state, history_html])
 
     demo.queue(default_concurrency_limit=4)
@@ -901,12 +1117,18 @@ def build_app(args: argparse.Namespace):
 
 
 def parse_args() -> argparse.Namespace:
-    resolved_device = os.environ.get("APERTUS_MODEL_UI_DEVICE", default_device())
+    resolved_base_device = os.environ.get("APERTUS_MODEL_UI_BASE_DEVICE", default_device_for(0))
+    resolved_device = os.environ.get("APERTUS_MODEL_UI_DEVICE", default_device_for(1) or default_device())
+    resolved_base_dtype = os.environ.get("APERTUS_MODEL_UI_BASE_DTYPE", default_dtype(resolved_base_device))
     resolved_dtype = os.environ.get("APERTUS_MODEL_UI_DTYPE", default_dtype(resolved_device))
 
-    parser = argparse.ArgumentParser(description="Run a Gradio UI to inspect a trained CPT checkpoint.")
+    parser = argparse.ArgumentParser(description="Run a Gradio UI to compare the base and trained CPT checkpoints.")
     parser.add_argument("--host", default=os.environ.get("APERTUS_MODEL_UI_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("APERTUS_MODEL_UI_PORT", "7861")))
+    parser.add_argument("--base-model", default=discover_base_model())
+    parser.add_argument("--base-label", default=os.environ.get("APERTUS_MODEL_UI_BASE_LABEL", "Apertus base"))
+    parser.add_argument("--base-device", default=resolved_base_device)
+    parser.add_argument("--base-dtype", default=resolved_base_dtype, choices=["bfloat16", "float16", "float32"])
     parser.add_argument("--model-path", default=discover_default_model())
     parser.add_argument("--model-label", default=os.environ.get("APERTUS_MODEL_UI_LABEL", "Trained CPT model"))
     parser.add_argument("--device", default=resolved_device)
