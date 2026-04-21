@@ -44,6 +44,32 @@ Useful flags:
 
 The output report includes overall accuracy, group-wise accuracy, subject-wise accuracy, level-wise accuracy, and trained-minus-base accuracy deltas.
 
+# plot
+
+After generating the JSON report, convert it into PNG bar charts with:
+
+```bash
+./run_uenv.sh python evaluation/plot_greek_mmlu_report.py \
+	artifacts/reports/greek_mmlu_eval.json \
+	--output-dir artifacts/reports/greek_mmlu_eval_plots
+```
+
+This writes the following images under `artifacts/reports/greek_mmlu_eval_plots`:
+
+- `overall_accuracy.png`
+- `group_accuracy.png`
+- `level_accuracy.png`
+- `subject_accuracy_comparison.png`
+- `subject_accuracy_delta.png`
+
+Useful plotting flags:
+
+- `--top-subjects 10` to keep only the top 10 subjects in the subject charts
+- `--subject-order trained` to sort subjects by trained-model accuracy
+- `--subject-order delta` to sort subjects by trained-minus-base improvement
+- `--dpi 240` to export higher-resolution PNGs
+- `--output-dir /tmp/greek_mmlu_plots` to write the images somewhere else
+
 # useful links
 - GreekMMLU dataset card: https://huggingface.co/datasets/dascim/GreekMMLU
 - GreekMMLU paper: https://arxiv.org/abs/2212.14096
