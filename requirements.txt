@@ -2,6 +2,7 @@ accelerate
 datasets
 gradio
 huggingface_hub
+matplotlib
 pyahocorasick
 safetensors
 sentencepiece
