@@ -71,7 +71,7 @@ export FULL_WARMUP_STEPS=100
 
 sbatch --nodes=4 --time=12:00:00 scripts/run_apertus_greek_cpt_clariden_multinode.sh
 ```
-* train will get arround 4H
+* train will get arround 2H
 
 * Use the same OUTPUT_DIR on posible rerun.
   If you keep the same output directory, warmup resumes from output_dir/warmup and full resumes from output_dir/full. If warmup is already complete, the code loads that checkpoint and skips warmup cleanly before moving on.
