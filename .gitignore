@@ -5,3 +5,6 @@ __pycache__
 artifacts/*
 trash/*
 core_*
+*.out
+*.log
+*.tmp
