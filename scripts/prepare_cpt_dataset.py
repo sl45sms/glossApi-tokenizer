@@ -1,3 +1,4 @@
+#this script prepares a CPT training dataset by streaming raw text from one or more datasets, tokenizing and packing it into fixed-length sequences, and writing the packed sequences to parquet files on disk along with metadata describing the dataset composition and statistics. This allows the CPT training step to read pre-packed sequences directly from disk without needing to stream and tokenize raw text on the fly.
 import argparse
 import json
 import os
@@ -15,6 +16,7 @@ DEFAULT_GREEK_DATASET = "epfml/FineWeb2-HQ"
 DEFAULT_GREEK_CONFIG = "ell_Grek"
 DEFAULT_ENGLISH_DATASET = "epfml/FineWeb-HQ"
 DEFAULT_TEXT_COLUMN = "text"
+LOCAL_JSON_SUFFIXES = (".json", ".jsonl", ".json.gz", ".jsonl.gz")
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,12 +51,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--greek-dataset",
         default=DEFAULT_GREEK_DATASET,
-        help="Dataset id for the Greek CPT stream.",
+        help="Dataset id or local .json/.jsonl file for the Greek CPT stream.",
     )
     parser.add_argument(
         "--greek-config",
         default=DEFAULT_GREEK_CONFIG,
-        help="Optional dataset config for the Greek CPT stream.",
+        help="Optional dataset config for the Greek CPT stream. Ignored for local JSON/JSONL files.",
     )
     parser.add_argument(
         "--greek-split",
@@ -64,11 +66,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--english-dataset",
         default=DEFAULT_ENGLISH_DATASET,
-        help="Dataset id for the English anchor stream.",
+        help="Dataset id or local .json/.jsonl file for the English anchor stream.",
     )
     parser.add_argument(
         "--english-config",
-        help="Optional dataset config for the English anchor stream.",
+        help="Optional dataset config for the English anchor stream. Ignored for local JSON/JSONL files.",
     )
     parser.add_argument(
         "--english-split",
@@ -161,7 +163,33 @@ def select_text_and_source(example: Dict[str, Any], text_column: str, source_nam
     }
 
 
+def is_local_json_dataset_path(dataset_name: str) -> bool:
+    return dataset_name.lower().endswith(LOCAL_JSON_SUFFIXES)
+
+
+def resolve_local_json_dataset_path(dataset_name: str) -> Path | None:
+    dataset_path = Path(dataset_name).expanduser()
+
+    if not is_local_json_dataset_path(dataset_name):
+        return None
+    if not dataset_path.exists():
+        raise SystemExit(f"Local JSON dataset file not found: {dataset_path}")
+    if not dataset_path.is_file():
+        raise SystemExit(f"Local JSON dataset path is not a file: {dataset_path}")
+
+    return dataset_path
+
+
 def load_streaming_dataset(dataset_name: str, dataset_config: str | None, split: str):
+    local_json_path = resolve_local_json_dataset_path(dataset_name)
+    if local_json_path is not None:
+        return load_dataset(
+            "json",
+            data_files={split: str(local_json_path)},
+            split=split,
+            streaming=True,
+        )
+
     dataset_kwargs: Dict[str, Any] = {
         "path": dataset_name,
         "split": split,
