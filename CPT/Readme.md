@@ -57,6 +57,8 @@ The repository includes the `scripts/prepare_cpt_dataset.py` to move tokenizatio
 
 The script streams the configured Greek and English datasets once, tokenizes them with the extended tokenizer, inserts EOS separators between documents, packs fixed-length sequences, and writes parquet shards plus `metadata.json`.
 
+`--greek-dataset` and `--english-dataset` accept either a Hugging Face dataset id or a local `.json` / `.jsonl` file. This is useful when you want to pack the filtered targeted-CPT output from `targetedCPT-DatasetGen/filter.py`, for example `${SCRATCH}/targeted-cpt/curated_greek_cpt.jsonl`.
+
 Recommended placement on Clariden:
 
 - prepared parquet shards: `/iopsstor/scratch`
@@ -82,6 +84,19 @@ For a short benchmark corpus instead of a full pass, cap the output:
 	--output-dir /iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-packed-bench \
 	--max-seq-length 2048 \
 	--max-output-sequences 4096 \
+	--overwrite
+```
+
+To pack only the filtered Greek JSONL without the English anchor stream:
+
+```bash
+./run_uenv.sh python scripts/prepare_cpt_dataset.py \
+	--tokenizer-path artifacts/tokenizers/apertus-greek-v1 \
+	--output-dir /iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-targeted-packed-2048 \
+	--greek-dataset ${SCRATCH}/targeted-cpt/curated_greek_cpt.jsonl \
+	--greek-probability 1.0 \
+	--english-probability 0 \
+	--max-seq-length 2048 \
 	--overwrite
 ```
 
