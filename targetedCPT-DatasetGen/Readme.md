@@ -1,6 +1,7 @@
-To train with full ~80GB el_Grek corpus from fineweb-2-hq can takes around 70Hours on 4 nodes with 16 A100 80GB GPUs, that ofcource will produse the best results.
+To train with the full ~80GB `ell_Grek` corpus from `epfml/FineWeb2-HQ` gives the best result, but it is slow for quick iteration.
 
-Estimate on four Clariden Nodes (16x GH200)
+Estimate on four Clariden nodes (16x GH200)
+
 |--|80GB Full CPT|100MB Targeted CPT|1GB Curated CPT|
 |---|---|---|---|
 |Time (4x GH200)|~2-4 Days|~30 Minutes|~3-5 Hours|
@@ -8,19 +9,57 @@ Estimate on four Clariden Nodes (16x GH200)
 |Language Flow|Native|Slightly "broken"|Natural|
 |Overfitting Risk|None|High|Low|
 
-However, for quick iteration and benchmarking, we can use the 100MB targeted CPT dataset, which can produce good results in around 30 minutes on 4 nodes with 16 A100 80GB GPUs.
+The filtering step is CPU-side preprocessing, so it should run through `uenv` like the other tokenizer and dataset scripts in this repo.
 
-To filter 80GB of text searching for 20,000 different tokens, the classical approach with `if token in text:` would take weeks. 
+Run the filter with:
 
-We will use a much more efficient approach based on the Aho-Corasick algorithm (via the `pyahocorasick` library) or a set-based approach after a quick split. Since you are on Clariden, your processor (Grace CPU) is very powerful, so we will leverage multiprocessing.
+```bash
+./run_uenv.sh python targetedCPT-DatasetGen/filter.py \
+	--overwrite
+```
 
-**Filtering Strategy**
+Important notes:
 
-**Aho-Corasick Automaton:** We construct a "tree" with all 20,000 words. This enables searching for all words simultaneously with a single pass through each line of text (O(n) time complexity).
+- The script uses the `pyahocorasick` pip package and imports it as `ahocorasick`.
+- `requirements.txt` now includes `pyahocorasick`, and `run_uenv.sh` will sync updated repo requirements into `.venv-uenv` before running the command.
+- When `SCRATCH` is defined, the default output path is `$SCRATCH/targeted-cpt/curated_greek_cpt.jsonl`.
+- The default JSON summary report is written to `artifacts/reports/targeted_cpt_filter_summary.json`.
 
-**Global Counter:** We maintain an array that counts how many times we have found each word.
+Filtering strategy:
 
-**Early Exit:** When a line contains words we still "need" (i.e., they have < 50 occurrences), we save it.
+- Build one Aho-Corasick automaton for all selected tokenizer candidates from `artifacts/vocab_candidates/selected_tokens_v1.txt`.
+- Stream the FineWeb2-HQ Greek split so RAM stays bounded.
+- Use multiprocessing so Clariden Grace CPU cores do the substring matching in parallel.
+- Keep a global counter in the main process and only write documents that still help underfilled targets.
+- Stop early once every target has reached `--limit-per-word`, or when an optional document or byte cap is reached.
 
-This approach is very efficient and can filter the 80GB dataset in a few hours on a single node, which is a huge improvement over the naive method.
+One implementation detail matters for this repo: many corpus-derived tokenizer candidates are stored with a leading space in `selected_tokens_v1.txt` because that is the right format for tokenizer insertion. The filter script strips that leading space for text search and treats those entries as boundary-sensitive surface-form matches, so they still match raw documents correctly.
 
+Useful options:
+
+- `--limit-per-word 50` keeps up to fifty selected documents per target token.
+- `--workers 16` uses more Clariden CPU processes for matching.
+- `--max-output-bytes 104857600` stops around a 100MB targeted dataset.
+- `--max-output-bytes 1073741824` stops around a 1GB curated dataset.
+- `--max-documents 200000` does a shorter dry run.
+- `--quality-score-min 4.0` ignores lower-quality FineWeb rows.
+- `--report-every 10000` prints progress every 10k scanned documents.
+
+Examples:
+
+```bash
+./run_uenv.sh python targetedCPT-DatasetGen/filter.py \
+	--limit-per-word 10 \
+	--max-output-bytes 104857600 \
+	--overwrite
+```
+
+```bash
+./run_uenv.sh python targetedCPT-DatasetGen/filter.py \
+	--limit-per-word 50 \
+	--max-output-bytes 1073741824 \
+	--workers 16 \
+	--overwrite
+```
+
+keep in mind the TARGET_WORDS should be in the same format as expected by the tokenizer (e.g., with a leading space if that's how they appear in the tokenized text).
