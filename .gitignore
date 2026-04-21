@@ -8,3 +8,4 @@ core_*
 *.out
 *.log
 *.tmp
+pnotes.md
