@@ -6,7 +6,14 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 
-from transformers import AutoTokenizer
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+import sys
+
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from repo_tokenizer import load_repo_tokenizer
 
 from tokenizer_extract_common import build_readable_tokenizer_json, normalize_tokenizer_config
 
@@ -393,7 +400,7 @@ def main() -> None:
     validate_args(args)
     prepare_output_paths(args)
 
-    tokenizer = AutoTokenizer.from_pretrained(
+    tokenizer = load_repo_tokenizer(
         args.base_tokenizer,
         trust_remote_code=args.trust_remote_code,
     )

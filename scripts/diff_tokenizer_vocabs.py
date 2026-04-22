@@ -3,7 +3,14 @@ import json
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from transformers import AutoTokenizer
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+import sys
+
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from repo_tokenizer import load_repo_tokenizer
 
 
 DEFAULT_BASE_TOKENIZER = "artifacts/tokenizers/apertus-base"
@@ -93,11 +100,11 @@ def filter_vocab(tokenizer, vocab: Dict[str, int], filter_mode: str) -> Dict[str
 def main() -> None:
     args = parse_args()
 
-    base_tokenizer = AutoTokenizer.from_pretrained(
+    base_tokenizer = load_repo_tokenizer(
         args.base_tokenizer,
         trust_remote_code=args.trust_remote_code,
     )
-    reference_tokenizer = AutoTokenizer.from_pretrained(
+    reference_tokenizer = load_repo_tokenizer(
         args.reference_tokenizer,
         trust_remote_code=args.trust_remote_code,
     )

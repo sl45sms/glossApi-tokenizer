@@ -3,7 +3,14 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from transformers import AutoTokenizer
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+import sys
+
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from repo_tokenizer import load_repo_tokenizer
 
 
 DEFAULT_BASE_TOKENIZER = "swiss-ai/Apertus-8B-Instruct-2509"
@@ -245,17 +252,17 @@ def main() -> None:
     if not samples:
         raise SystemExit("Provide at least one sample via --text or --sample-file.")
 
-    base_tokenizer = AutoTokenizer.from_pretrained(
+    base_tokenizer = load_repo_tokenizer(
         args.base_tokenizer,
         trust_remote_code=args.trust_remote_code,
     )
     extended_tokenizer = None
     if args.extended_tokenizer:
-        extended_tokenizer = AutoTokenizer.from_pretrained(
+        extended_tokenizer = load_repo_tokenizer(
             args.extended_tokenizer,
             trust_remote_code=args.trust_remote_code,
         )
-    reference_tokenizer = AutoTokenizer.from_pretrained(
+    reference_tokenizer = load_repo_tokenizer(
         args.reference_tokenizer,
         trust_remote_code=args.trust_remote_code,
     )
