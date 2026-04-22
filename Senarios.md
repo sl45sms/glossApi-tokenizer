@@ -77,4 +77,21 @@ sbatch --nodes=4 --time=12:00:00 scripts/run_apertus_greek_cpt_clariden_multinod
   If you keep the same output directory, warmup resumes from output_dir/warmup and full resumes from output_dir/full. If warmup is already complete, the code loads that checkpoint and skips warmup cleanly before moving on.
 
 at this point you have a new CPT-trained model that knows how to use the new tokens in some degree but may behave like base model, so need to procced with SFT to further teach the model to use the new tokens in a more natural way.
+
+you can run an evaluation test on the CPT checkpoint at this point, but the results will likely be underwhelming since the model has not yet learned to use the new tokens effectively. The evaluation script is `evaluation/evaluate_greek_mmlu.py`, and it produces a JSON report with category-wise and overall accuracy.
+```
+./run_uenv.sh python evaluation/evaluate_greek_mmlu.py \
+	--base-model swiss-ai/Apertus-8B-Instruct-2509 \
+	--trained-model /capstor/scratch/cscs/${USER}/apertus-greek-cpt-prod-xielu-sdpa-nogc-curated-1GB-2048seq-1000steps/final \
+	--output-json artifacts/reports/greek_mmlu_eval.json
+  ```
+  or you can use the UI to interact with the model and see how it uses the new tokens in practice.
+
+  ```
+  ./run_model_ui.sh --base-device cuda:0 --device cuda:1 \
+--model-path /capstor/scratch/cscs/p-skarvelis/apertus-greek-cpt-prod-xielu-sdpa-nogc-curated-1GB-2048seq-1000steps/final
+  ```
+
 # SFT training
+running SFT is necessary to further teach the model to use the new tokens in a more natural way, and to see more significant improvements in evaluation benchmarks like GreekMMLU. The CPT training gives the model some exposure to the new tokens and their context, but SFT with a well-designed dataset can really solidify that knowledge and lead to much better performance.
+
