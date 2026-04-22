@@ -11,6 +11,10 @@ Use the repo's `uenv` wrapper so the evaluator runs with the same Python environ
 	--output-json artifacts/reports/greek_mmlu_eval.json
 ```
 
+By default, the script caches the base-model evaluation at `artifacts/reports/greek_mmlu_base_eval.json` and reuses it on later runs, so repeated evaluations only score the current trained checkpoint.
+
+If you need to recompute the base model, add `--refresh-base-report-cache`.
+
 If the model requires remote code during loading, add `--trust-remote-code`.
 
 The script defaults to:
@@ -41,6 +45,7 @@ Useful flags:
 - `--subject Agriculture` to restrict evaluation to one or more subjects
 - `--num-few-shot 0` to run zero-shot instead of the default 5-shot setup
 - `--save-predictions` to include per-example predictions in the output JSON
+- `--refresh-base-report-cache` to force a fresh base-model evaluation instead of reusing the cached one
 
 The output report includes overall accuracy, group-wise accuracy, subject-wise accuracy, level-wise accuracy, and trained-minus-base accuracy deltas.
 

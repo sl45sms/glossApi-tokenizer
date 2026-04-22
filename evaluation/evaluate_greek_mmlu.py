@@ -2,6 +2,7 @@
 
 import argparse
 import gc
+import hashlib
 import json
 import sys
 import time
@@ -20,6 +21,7 @@ DEFAULT_TRAINED_MODEL = "/capstor/store/cscs/swissai/a0140/p-skarvelis/apertus-g
 DEFAULT_DATASET = "dascim/GreekMMLU"
 DEFAULT_DATASET_CONFIG = "All"
 DEFAULT_OUTPUT_JSON = "artifacts/reports/greek_mmlu_eval.json"
+DEFAULT_BASE_REPORT_CACHE = "artifacts/reports/greek_mmlu_base_eval.json"
 ANSWER_LABELS = ("Α", "Β", "Γ", "Δ")
 PROMPT_INSTRUCTION = (
 	"Απάντησε στην ακόλουθη ερώτηση πολλαπλής επιλογής δίνοντας μόνο το γράμμα "
@@ -94,6 +96,22 @@ def parse_args() -> argparse.Namespace:
 		"--output-json",
 		default=DEFAULT_OUTPUT_JSON,
 		help="Where to write the evaluation report.",
+	)
+	parser.add_argument(
+		"--base-report-cache",
+		default=DEFAULT_BASE_REPORT_CACHE,
+		help="Path where the base-model evaluation cache is stored and reused across runs.",
+	)
+	parser.add_argument(
+		"--use-base-report-cache",
+		action=argparse.BooleanOptionalAction,
+		default=True,
+		help="Reuse a persistent base-model evaluation cache instead of recomputing the base model every run.",
+	)
+	parser.add_argument(
+		"--refresh-base-report-cache",
+		action="store_true",
+		help="Ignore any existing cached base evaluation and recompute it before updating the cache.",
 	)
 	parser.add_argument(
 		"--device",
@@ -194,6 +212,100 @@ def load_examples(
 			break
 
 	return examples
+
+
+def normalize_subject_filter(subject_filter: Optional[Sequence[str]]) -> List[str]:
+	return sorted({value.strip() for value in subject_filter or [] if value and value.strip()})
+
+
+def compute_examples_fingerprint(examples: Sequence[GreekMMLUExample]) -> str:
+	hasher = hashlib.sha256()
+	for example in examples:
+		for value in (example.question, *example.choices, str(example.answer), example.group, example.subject, example.level):
+			hasher.update(value.encode("utf-8"))
+			hasher.update(b"\0")
+		hasher.update(b"\1")
+	return hasher.hexdigest()
+
+
+def build_base_cache_key(
+	args: argparse.Namespace,
+	examples: Sequence[GreekMMLUExample],
+	few_shot_examples: Sequence[GreekMMLUExample],
+) -> Dict[str, Any]:
+	return {
+		"cache_format": 1,
+		"base_model": args.base_model,
+		"dataset": args.dataset,
+		"dataset_config": args.dataset_config,
+		"split": args.split,
+		"dev_split": args.dev_split,
+		"num_few_shot": args.num_few_shot,
+		"limit": args.limit,
+		"subject_filter": normalize_subject_filter(args.subject),
+		"torch_dtype": args.torch_dtype,
+		"trust_remote_code": args.trust_remote_code,
+		"use_chat_template": args.use_chat_template,
+		"attn_implementation": args.attn_implementation,
+		"save_predictions": args.save_predictions,
+		"prompt_instruction": PROMPT_INSTRUCTION,
+		"answer_labels": list(ANSWER_LABELS),
+		"evaluation_examples_fingerprint": compute_examples_fingerprint(examples),
+		"few_shot_examples_fingerprint": compute_examples_fingerprint(few_shot_examples),
+	}
+
+
+def is_valid_model_report(report: Any) -> bool:
+	return isinstance(report, dict) and all(
+		key in report
+		for key in ("model_ref", "overall", "group_accuracy", "subject_accuracy", "level_accuracy", "runtime_seconds")
+	)
+
+
+def load_cached_base_report(cache_path: Path, expected_cache_key: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+	if not cache_path.exists():
+		return None
+
+	try:
+		payload = json.loads(cache_path.read_text(encoding="utf-8"))
+	except json.JSONDecodeError:
+		print(
+			f"Ignoring unreadable base cache at {cache_path}; recomputing the base model evaluation.",
+			file=sys.stderr,
+			flush=True,
+		)
+		return None
+
+	cache_key = payload.get("cache_key")
+	base_report = payload.get("base_report")
+	if cache_key != expected_cache_key:
+		print(
+			f"Base cache at {cache_path} does not match the current evaluation settings; recomputing.",
+			file=sys.stderr,
+			flush=True,
+		)
+		return None
+	if not is_valid_model_report(base_report):
+		print(
+			f"Base cache at {cache_path} is missing the expected report fields; recomputing.",
+			file=sys.stderr,
+			flush=True,
+		)
+		return None
+	return base_report
+
+
+def save_cached_base_report(
+	cache_path: Path,
+	cache_key: Dict[str, Any],
+	base_report: Dict[str, Any],
+) -> None:
+	payload = {
+		"cache_key": cache_key,
+		"base_report": base_report,
+	}
+	cache_path.parent.mkdir(parents=True, exist_ok=True)
+	cache_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def render_question_block(example: GreekMMLUExample, include_answer: bool) -> str:
@@ -513,6 +625,8 @@ def build_report(
 	few_shot_examples: Sequence[GreekMMLUExample],
 	base_report: Dict[str, Any],
 	trained_report: Dict[str, Any],
+	base_report_cache_path: Optional[Path],
+	base_report_cache_hit: bool,
 ) -> Dict[str, Any]:
 	return {
 		"dataset": {
@@ -536,6 +650,10 @@ def build_report(
 			"base": base_report,
 			"trained": trained_report,
 		},
+		"cache": {
+			"base_report_cache": str(base_report_cache_path) if base_report_cache_path is not None else None,
+			"base_report_cache_hit": base_report_cache_hit,
+		},
 		"comparison": {
 			"overall_accuracy_delta": (
 				trained_report["overall"]["accuracy"] - base_report["overall"]["accuracy"]
@@ -558,6 +676,7 @@ def build_report(
 
 def main() -> None:
 	args = parse_args()
+	base_report_cache_path = Path(args.base_report_cache) if args.use_base_report_cache and args.base_report_cache else None
 	examples = load_examples(
 		dataset_name=args.dataset,
 		dataset_config=args.dataset_config,
@@ -576,6 +695,7 @@ def main() -> None:
 		limit=None,
 	)
 	few_shot_index = build_few_shot_index(few_shot_examples)
+	base_cache_key = build_base_cache_key(args, examples, few_shot_examples)
 
 	print(
 		(
@@ -586,14 +706,35 @@ def main() -> None:
 		flush=True,
 	)
 
-	base_report = evaluate_model(
-		model_label="base",
-		model_ref=args.base_model,
-		examples=examples,
-		few_shot_index=few_shot_index,
-		all_few_shot_examples=few_shot_examples,
-		args=args,
-	)
+	base_report_cache_hit = False
+	base_report: Optional[Dict[str, Any]] = None
+	if base_report_cache_path is not None and not args.refresh_base_report_cache:
+		base_report = load_cached_base_report(base_report_cache_path, base_cache_key)
+		if base_report is not None:
+			base_report_cache_hit = True
+			print(
+				f"Using cached base evaluation from {base_report_cache_path}.",
+				file=sys.stderr,
+				flush=True,
+			)
+
+	if base_report is None:
+		base_report = evaluate_model(
+			model_label="base",
+			model_ref=args.base_model,
+			examples=examples,
+			few_shot_index=few_shot_index,
+			all_few_shot_examples=few_shot_examples,
+			args=args,
+		)
+		if base_report_cache_path is not None:
+			save_cached_base_report(base_report_cache_path, base_cache_key, base_report)
+			print(
+				f"Saved base evaluation cache to {base_report_cache_path}.",
+				file=sys.stderr,
+				flush=True,
+			)
+
 	trained_report = evaluate_model(
 		model_label="trained",
 		model_ref=args.trained_model,
@@ -609,6 +750,8 @@ def main() -> None:
 		few_shot_examples=few_shot_examples,
 		base_report=base_report,
 		trained_report=trained_report,
+		base_report_cache_path=base_report_cache_path,
+		base_report_cache_hit=base_report_cache_hit,
 	)
 
 	output_path = Path(args.output_json)
@@ -617,6 +760,8 @@ def main() -> None:
 
 	summary = {
 		"output_json": str(output_path),
+		"base_report_cache": str(base_report_cache_path) if base_report_cache_path is not None else None,
+		"base_report_cache_hit": base_report_cache_hit,
 		"base_accuracy": base_report["overall"]["accuracy"],
 		"trained_accuracy": trained_report["overall"]["accuracy"],
 		"accuracy_delta": report["comparison"]["overall_accuracy_delta"],
