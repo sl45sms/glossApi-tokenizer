@@ -3,12 +3,19 @@ import argparse
 import json
 import os
 import shutil
+import sys
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Sequence
 
 from datasets import Dataset, interleave_datasets, load_dataset
-from transformers import AutoTokenizer, PreTrainedTokenizerFast
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from repo_tokenizer import load_repo_tokenizer
 
 
 DEFAULT_TOKENIZER_PATH = "artifacts/tokenizers/apertus-greek-v1"
@@ -218,50 +225,10 @@ def build_source_dataset(
 
 
 def load_tokenizer(tokenizer_path: str, trust_remote_code: bool):
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer_path,
-            trust_remote_code=trust_remote_code,
-        )
-    except ValueError as exc:
-        if "Tokenizer class TokenizersBackend does not exist" not in str(exc):
-            raise
-
-        path = Path(tokenizer_path)
-        tokenizer_file = path / "tokenizer.json"
-        tokenizer_config_path = path / "tokenizer_config.json"
-        if not tokenizer_file.exists():
-            raise SystemExit(
-                f"Tokenizer metadata references TokenizersBackend, but {tokenizer_file} was not found."
-            ) from exc
-
-        tokenizer_config: Dict[str, Any] = {}
-        if tokenizer_config_path.exists():
-            tokenizer_config = json.loads(tokenizer_config_path.read_text(encoding="utf-8"))
-
-        compatible_kwargs: Dict[str, Any] = {
-            "tokenizer_file": str(tokenizer_file),
-        }
-        for key in (
-            "bos_token",
-            "eos_token",
-            "unk_token",
-            "sep_token",
-            "pad_token",
-            "cls_token",
-            "mask_token",
-            "additional_special_tokens",
-            "add_prefix_space",
-            "model_max_length",
-            "padding_side",
-            "truncation_side",
-            "clean_up_tokenization_spaces",
-            "model_input_names",
-        ):
-            if key in tokenizer_config:
-                compatible_kwargs[key] = tokenizer_config[key]
-
-        tokenizer = PreTrainedTokenizerFast(**compatible_kwargs)
+    tokenizer = load_repo_tokenizer(
+        tokenizer_path,
+        trust_remote_code=trust_remote_code,
+    )
 
     if tokenizer.pad_token is None and tokenizer.eos_token is not None:
         tokenizer.pad_token = tokenizer.eos_token

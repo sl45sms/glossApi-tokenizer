@@ -168,6 +168,7 @@ fi
 rm -rf "${STAGE_ROOT}"
 mkdir -p "${STAGE_ROOT}"
 tar -C "${REPO_ROOT}" -cz CPT scripts Agents.md Readme.md requirements.txt | tar -xz -C "${STAGE_ROOT}"
+cp "${REPO_ROOT}/repo_tokenizer.py" "${STAGE_ROOT}/repo_tokenizer.py"
 
 effective_global_batch=$((PER_DEVICE_TRAIN_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS * EXPECTED_WORLD_SIZE))
 

@@ -6,7 +6,14 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, DefaultDict, Dict, Iterator, List, Optional, Sequence, Tuple
 
-from transformers import AutoTokenizer
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+import sys
+
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from repo_tokenizer import load_repo_tokenizer
 
 
 DEFAULT_INPUT_DB_PATH = Path("artifacts/vocab_candidates/fineweb2_hq_ell_grek_word_counts.sqlite3")
@@ -614,7 +621,7 @@ def main() -> None:
     filtered_rows, source_filter_stats = filter_source_rows(args, source_rows)
     collapsed_rows, variant_details, case_variant_stats = collapse_case_variants(args, filtered_rows)
 
-    base_tokenizer = AutoTokenizer.from_pretrained(
+    base_tokenizer = load_repo_tokenizer(
         args.base_tokenizer,
         trust_remote_code=args.trust_remote_code,
     )

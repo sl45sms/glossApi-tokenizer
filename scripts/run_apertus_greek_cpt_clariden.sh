@@ -125,6 +125,7 @@ fi
 rm -rf "${STAGE_ROOT}"
 mkdir -p "${STAGE_ROOT}"
 tar -C "${REPO_ROOT}" -cz CPT scripts Agents.md Readme.md requirements.txt | tar -xz -C "${STAGE_ROOT}"
+cp "${REPO_ROOT}/repo_tokenizer.py" "${STAGE_ROOT}/repo_tokenizer.py"
 
 echo "Using CE environment: ${CE_ENVIRONMENT}" >&2
 echo "Using model path: ${MODEL_PATH}" >&2

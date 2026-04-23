@@ -13,7 +13,14 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import torch
 from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+	sys.path.insert(0, str(REPO_ROOT))
+
+from repo_tokenizer import load_repo_tokenizer
 
 
 DEFAULT_BASE_MODEL = "swiss-ai/Apertus-8B-Instruct-2509"
@@ -429,7 +436,7 @@ class ModelScorer:
 	) -> None:
 		self.model_ref = model_ref
 		self.device = device
-		self.tokenizer = AutoTokenizer.from_pretrained(
+		self.tokenizer = load_repo_tokenizer(
 			model_ref,
 			trust_remote_code=trust_remote_code,
 		)

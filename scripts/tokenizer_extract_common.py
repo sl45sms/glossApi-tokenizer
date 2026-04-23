@@ -4,7 +4,14 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from transformers import AutoTokenizer
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+import sys
+
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from repo_tokenizer import load_repo_tokenizer
 
 
 COMPATIBLE_TOKENIZER_CLASS = "PreTrainedTokenizerFast"
@@ -127,7 +134,7 @@ def extract_tokenizer(args: argparse.Namespace) -> Dict[str, Any]:
     args.report_path.parent.mkdir(parents=True, exist_ok=True)
     args.readable_tokenizer_path.parent.mkdir(parents=True, exist_ok=True)
 
-    tokenizer = AutoTokenizer.from_pretrained(
+    tokenizer = load_repo_tokenizer(
         args.model_id,
         trust_remote_code=args.trust_remote_code,
     )
