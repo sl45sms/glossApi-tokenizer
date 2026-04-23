@@ -10,6 +10,7 @@ What is now in this folder:
 
 - `sft.py`: full-finetuning entrypoint built on `transformers.Trainer`
 - `run_apertus_greek_sft_clariden.sh`: single-node Clariden launcher using the existing CE/EDF workflow from this repo
+- `run_apertus_greek_sft_clariden_multinode.sh`: multi-node Clariden launcher using Slurm rendezvous and `torch.distributed.run` across nodes
 
 Trainer behavior:
 
@@ -38,6 +39,29 @@ Default full SFT launch:
 VALIDATION_SAMPLES=2048 \
 OUTPUT_DIR=/capstor/scratch/cscs/${USER}/apertus-greek-sft \
 sbatch SFT/run_apertus_greek_sft_clariden.sh
+```
+
+Multi-node Clariden launch:
+
+- `SFT/run_apertus_greek_sft_clariden_multinode.sh` starts from 4 nodes / 16 GPUs and derives `GRADIENT_ACCUMULATION_STEPS` from `TARGET_GLOBAL_BATCH_SIZE=32` by default so the effective global batch stays aligned with the single-node default shape.
+- The multi-node launcher reuses the same Clariden network settings as the CPT multi-node path and uses `MASTER_ADDR` / `MASTER_PORT` rendezvous instead of `--standalone`.
+
+Example multi-node full SFT launch:
+
+```bash
+VALIDATION_SAMPLES=2048 \
+OUTPUT_DIR=/capstor/scratch/cscs/${USER}/apertus-greek-sft \
+sbatch SFT/run_apertus_greek_sft_clariden_multinode.sh
+```
+
+Example multi-node 2048-token launch:
+
+```bash
+MAX_SEQ_LENGTH=2048 \
+DISTRIBUTED_STRATEGY=fsdp_full_shard \
+VALIDATION_SAMPLES=2048 \
+OUTPUT_DIR=/capstor/scratch/cscs/${USER}/apertus-greek-sft \
+sbatch SFT/run_apertus_greek_sft_clariden_multinode.sh
 ```
 
 
@@ -74,6 +98,10 @@ ATTN_IMPLEMENTATION=eager \
 GRADIENT_CHECKPOINTING=0 \
 GRADIENT_ACCUMULATION_STEPS=8 \
 sbatch SFT/run_apertus_greek_sft_clariden.sh
+
+# resume a multi-node run from a saved checkpoint
+RESUME_FROM_CHECKPOINT=/capstor/scratch/cscs/${USER}/apertus-greek-sft/checkpoint-1000 \
+sbatch SFT/run_apertus_greek_sft_clariden_multinode.sh
 ```
 
 Minimal local validation:
