@@ -44,6 +44,14 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument(
+        "--prepared-dataset-dir",
+        help=(
+            "Optional directory containing prepared parquet shards plus metadata.json produced by "
+            "scripts/prepare_sft_dataset.py. When set, SFT loads tokenized examples from disk "
+            "instead of rendering and tokenizing raw chats at startup."
+        ),
+    )
+    parser.add_argument(
         "--model-path",
         default=DEFAULT_MODEL_PATH,
         help="Checkpoint path or model id for the tokenizer-aligned CPT model to fine-tune.",
@@ -355,6 +363,12 @@ def validate_args(args: argparse.Namespace) -> None:
     output_dir = Path(args.output_dir)
     if model_path.is_absolute() and output_dir.is_absolute() and model_path == output_dir:
         raise SystemExit("--output-dir must differ from --model-path.")
+    if args.prepared_dataset_dir:
+        prepared_dir = Path(args.prepared_dataset_dir)
+        if not prepared_dir.exists() or not prepared_dir.is_dir():
+            raise SystemExit(
+                f"--prepared-dataset-dir must point to an existing directory, got {prepared_dir}."
+            )
 
 
 def resolve_torch_dtype(dtype_name: str):
@@ -556,6 +570,68 @@ def maybe_limit_dataset(dataset: Dataset, sample_limit: int | None, seed: int) -
     return dataset.shuffle(seed=seed).select(range(sample_limit))
 
 
+def load_prepared_dataset_metadata(prepared_dir: Path) -> Dict[str, Any] | None:
+    metadata_path = prepared_dir / "metadata.json"
+    if not metadata_path.exists():
+        return None
+    return json.loads(metadata_path.read_text(encoding="utf-8"))
+
+
+def load_prepared_dataset_split(prepared_dir: Path, split_name: str) -> Dataset | None:
+    split_dir = prepared_dir / split_name
+    if not split_dir.exists():
+        return None
+    shard_paths = sorted(split_dir.glob("*.parquet"))
+    if not shard_paths:
+        raise SystemExit(f"No parquet shards were found under {split_dir}.")
+    return load_dataset(
+        "parquet",
+        data_files=[str(path) for path in shard_paths],
+        split="train",
+    )
+
+
+def load_prepared_dataset_splits(args: argparse.Namespace) -> tuple[Dataset, Dataset | None]:
+    prepared_dir = Path(args.prepared_dataset_dir)
+    metadata = load_prepared_dataset_metadata(prepared_dir)
+    if metadata is not None:
+        prepared_seq_length = metadata.get("max_seq_length") or metadata.get("sequence_length")
+        if prepared_seq_length is not None and int(prepared_seq_length) != args.max_seq_length:
+            raise SystemExit(
+                "Prepared dataset sequence length mismatch: "
+                f"metadata.json says {prepared_seq_length}, but the current run expects {args.max_seq_length}."
+            )
+        prepared_truncation_side = metadata.get("truncation_side")
+        if prepared_truncation_side and prepared_truncation_side != args.truncation_side:
+            raise SystemExit(
+                "Prepared dataset truncation side mismatch: "
+                f"metadata.json says {prepared_truncation_side}, but the current run expects {args.truncation_side}."
+            )
+
+    train_dataset = load_prepared_dataset_split(prepared_dir, "train")
+    if train_dataset is None:
+        raise SystemExit(f"Prepared dataset is missing a train split under {prepared_dir / 'train'}.")
+
+    eval_dataset = load_prepared_dataset_split(prepared_dir, "eval")
+    if args.validation_samples > 0 and eval_dataset is None:
+        raise SystemExit(
+            "--validation-samples was set, but the prepared dataset does not contain an eval split."
+        )
+
+    max_train_samples = args.max_train_samples
+    if args.smoke_test:
+        max_train_samples = args.smoke_train_samples
+    train_dataset = maybe_limit_dataset(train_dataset, max_train_samples, args.seed)
+
+    if eval_dataset is not None:
+        max_eval_samples = args.max_eval_samples
+        if args.smoke_test and args.validation_samples == 0:
+            max_eval_samples = args.smoke_validation_samples
+        eval_dataset = maybe_limit_dataset(eval_dataset, max_eval_samples, args.seed)
+
+    return train_dataset, eval_dataset
+
+
 def load_raw_dataset(args: argparse.Namespace) -> Dataset:
     dataset_kwargs: Dict[str, Any] = {
         "path": args.dataset_name,
@@ -571,6 +647,11 @@ def load_raw_dataset(args: argparse.Namespace) -> Dataset:
 
 
 def build_dataset_splits(args: argparse.Namespace) -> tuple[Dataset, Dataset | None]:
+    prepared_dataset_dir = getattr(args, "prepared_dataset_dir", None)
+    if prepared_dataset_dir:
+        rank_zero_print(f"Loading prepared SFT dataset from {prepared_dataset_dir}.")
+        return load_prepared_dataset_splits(args)
+
     raw_dataset = load_raw_dataset(args)
     effective_validation_samples = args.validation_samples
 
@@ -787,24 +868,28 @@ def main() -> None:
     validate_runtime(args, model, tokenizer)
 
     train_raw_dataset, eval_raw_dataset = build_dataset_splits(args)
-    train_dataset = prepare_dataset(
-        train_raw_dataset,
-        tokenizer,
-        max_seq_length=args.max_seq_length,
-        preprocessing_batch_size=args.preprocessing_batch_size,
-        dataset_num_proc=args.dataset_num_proc,
-        split_name="train",
-    )
-    eval_dataset = None
-    if eval_raw_dataset is not None:
-        eval_dataset = prepare_dataset(
-            eval_raw_dataset,
+    if args.prepared_dataset_dir:
+        train_dataset = train_raw_dataset
+        eval_dataset = eval_raw_dataset
+    else:
+        train_dataset = prepare_dataset(
+            train_raw_dataset,
             tokenizer,
             max_seq_length=args.max_seq_length,
             preprocessing_batch_size=args.preprocessing_batch_size,
             dataset_num_proc=args.dataset_num_proc,
-            split_name="eval",
+            split_name="train",
         )
+        eval_dataset = None
+        if eval_raw_dataset is not None:
+            eval_dataset = prepare_dataset(
+                eval_raw_dataset,
+                tokenizer,
+                max_seq_length=args.max_seq_length,
+                preprocessing_batch_size=args.preprocessing_batch_size,
+                dataset_num_proc=args.dataset_num_proc,
+                split_name="eval",
+            )
 
     if is_world_process_zero():
         output_dir = Path(args.output_dir)
@@ -815,6 +900,7 @@ def main() -> None:
                 "dataset_name": args.dataset_name,
                 "dataset_config": args.dataset_config,
                 "dataset_split": args.dataset_split,
+                "prepared_dataset_dir": args.prepared_dataset_dir,
                 "max_seq_length": args.max_seq_length,
                 "truncation_side": args.truncation_side,
                 "distributed_strategy": args.distributed_strategy,
