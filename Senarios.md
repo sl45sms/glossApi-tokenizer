@@ -95,10 +95,37 @@ you can run an evaluation test on the CPT checkpoint at this point, but the resu
 # SFT training
 running SFT is necessary to further teach the model to use the new tokens in a more natural way, and to see more significant improvements in evaluation benchmarks like GreekMMLU. The CPT training gives the model some exposure to the new tokens and their context, but SFT with a well-designed dataset can really solidify that knowledge and lead to much better performance.
 
+create first the prepared dataset for SFT, which is a separate step from the CPT training. The prepared dataset is stored on shared storage and can be reused for multiple SFT runs, which saves time since you don't have to re-run the dataset preparation every time you want to train or evaluate the model.
+That takes about 40 minutes.
+
+```bash
+OVERWRITE=1 \
+VALIDATION_SAMPLES=2048 \
+MAX_SEQ_LENGTH=1024 \
+MODEL_PATH=/capstor/scratch/cscs/p-skarvelis/apertus-greek-cpt-prod-xielu-sdpa-nogc-curated-1GB-2048seq-400steps/final \
+sbatch scripts/run_prepare_sft_dataset_clariden.sh
+```
+
+### actual sft train
+```bash
+PREPARED_DATASET_DIR=/iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-sft-1024-left-val2048 \
+VALIDATION_SAMPLES=2048 \
+OUTPUT_DIR=/capstor/scratch/cscs/${USER}/apertus-greek-sft \
+sbatch SFT/run_apertus_greek_sft_clariden_multinode.sh
+
+```
+resume from checkpoint if needed
+```bash
+RESUME_FROM_CHECKPOINT=/capstor/scratch/cscs/${USER}/apertus-greek-sft/checkpoint-60500 \
+PREPARED_DATASET_DIR=/iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-sft-1024-left-val2048 \
+VALIDATION_SAMPLES=2048 \
+OUTPUT_DIR=/capstor/scratch/cscs/${USER}/apertus-greek-sft \
+sbatch SFT/run_apertus_greek_sft_clariden_multinode.sh
+```
+
 you can check the progress using checkpoints.
 for example, to run the UI on the latest checkpoint during training, you can do something like this:
-```
+```bash
 GRADIO_TEMP_DIR=/tmp/pgradio GRADIO_SERVER_PORT=8631 
- APERTUS_MODEL_UI_PORT=8631 ./run_model_ui.sh --base-device cuda:0 --device cuda:1 --model-path /capst
-or/scratch/cscs/p-skarvelis/apertus-greek-sft/checkpoint-9500/
+ APERTUS_MODEL_UI_PORT=8631 ./run_model_ui.sh --base-device cuda:0 --device cuda:1 --model-path /capstor/scratch/cscs/p-skarvelis/apertus-greek-sft/checkpoint-60500/
 ```
