@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -570,6 +571,14 @@ class ModelRuntime:
             return "auto"
         return {"": self.preferred_device}
 
+    def _autocast_context(self, device: str):
+        model_dtype = resolve_dtype(self.dtype_name)
+        if not device.startswith("cuda"):
+            return nullcontext()
+        if model_dtype not in {torch.float16, torch.bfloat16}:
+            return nullcontext()
+        return torch.autocast(device_type="cuda", dtype=model_dtype)
+
     def ensure_loaded(self) -> None:
         if self.model is not None and self.tokenizer is not None:
             return
@@ -657,7 +666,7 @@ class ModelRuntime:
                 generate_kwargs["temperature"] = float(temperature)
                 generate_kwargs["top_p"] = float(top_p)
 
-            with torch.inference_mode():
+            with torch.inference_mode(), self._autocast_context(model_device):
                 output_ids = self.model.generate(**generate_kwargs)
 
             generated_ids = output_ids[0][input_ids.shape[-1] :]
