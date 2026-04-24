@@ -2,7 +2,7 @@
 #SBATCH -A a0140
 #SBATCH --job-name=apertus-greek-cpt-mn
 #SBATCH --partition=normal
-#SBATCH --nodes=4
+#SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
