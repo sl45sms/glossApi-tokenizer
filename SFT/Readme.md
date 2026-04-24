@@ -11,6 +11,8 @@ What is now in this folder:
 - `sft.py`: full-finetuning entrypoint built on `transformers.Trainer`
 - `run_apertus_greek_sft_clariden.sh`: single-node Clariden launcher using the existing CE/EDF workflow from this repo
 - `run_apertus_greek_sft_clariden_multinode.sh`: multi-node Clariden launcher using Slurm rendezvous and `torch.distributed.run` across nodes
+- `../scripts/prepare_sft_dataset.py`: one-time SFT dataset exporter that renders chats, tokenizes them, and writes prepared parquet shards for reuse
+- `../scripts/run_prepare_sft_dataset_clariden.sh`: single-node Clariden CPU-heavy launcher for the prepared-SFT-dataset export path
 
 Trainer behavior:
 
@@ -18,8 +20,44 @@ Trainer behavior:
 - reads `swiss-ai/apertus-sft-mixture`, which currently exposes only a `train` split
 - normalizes each nested `messages` record into plain chat turns, renders it with the Apertus chat template, and tokenizes the rendered chat
 - applies assistant-only loss masking by training only on tokens between `<|assistant_start|>` and `<|assistant_end|>`
+- optionally loads a prepared dataset directory produced by `scripts/prepare_sft_dataset.py`, which avoids repeating the raw-chat render/tokenize step on every distributed rank
 - defaults to `max_seq_length=1024`, `per_device_train_batch_size=1`, `gradient_accumulation_steps=8`, `GRADIENT_CHECKPOINTING=0`, and `ATTN_IMPLEMENTATION=eager` for a safer first full-finetune shape on 4 GH200 GPUs
 - supports `--distributed-strategy fsdp_full_shard` to shard model and optimizer state across the 4 Clariden ranks when longer-context runs exceed DDP memory headroom
+
+Prepared dataset workflow:
+
+- Use `scripts/prepare_sft_dataset.py` to render and tokenize the SFT mixture once, then store `train/` and optional `eval/` parquet shards plus `metadata.json` on shared storage.
+- `SFT/sft.py` now accepts `--prepared-dataset-dir` and loads those shards directly instead of running `dataset.map(...)` over the raw chat corpus at startup.
+- Both Clariden launchers now auto-use `PREPARED_DATASET_DIR` when set, and they also auto-detect `${IOPS_SCRATCH_ROOT}/prepared-datasets/apertus-greek-sft-${MAX_SEQ_LENGTH}-${TRUNCATION_SIDE}-val${VALIDATION_SAMPLES}` when that directory already exists.
+
+Prepare a reusable 1024-token dataset with a held-out eval split:
+
+```bash
+./run_uenv.sh python scripts/prepare_sft_dataset.py \
+	--model-path /capstor/scratch/cscs/p-skarvelis/apertus-greek-cpt-prod-xielu-sdpa-nogc-curated-1GB-2048seq-400steps/final \
+	--validation-samples 2048 \
+	--max-seq-length 1024 \
+	--output-dir /iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-sft-1024-left-val2048 \
+	--overwrite
+```
+
+Or submit the CPU-heavy single-node Clariden launcher, which defaults to a larger CPU allocation and derives `DATASET_NUM_PROC` from the Slurm CPU count:
+
+```bash
+OVERWRITE=1 \
+VALIDATION_SAMPLES=2048 \
+MAX_SEQ_LENGTH=1024 \
+sbatch scripts/run_prepare_sft_dataset_clariden.sh
+```
+
+Then launch SFT with the prepared dataset explicitly:
+
+```bash
+PREPARED_DATASET_DIR=/iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-sft-1024-left-val2048 \
+VALIDATION_SAMPLES=2048 \
+OUTPUT_DIR=/capstor/scratch/cscs/${USER}/apertus-greek-sft \
+sbatch SFT/run_apertus_greek_sft_clariden_multinode.sh
+```
 
 Because the dataset has no published validation split, evaluation is off by default. To enable periodic eval, hold out a subset from train with `VALIDATION_SAMPLES` or `--validation-samples`.
 
