@@ -506,6 +506,8 @@ def build_labels(input_ids: Sequence[int], assistant_start_id: int, assistant_en
             in_assistant_span = True
             continue
         if token_id == assistant_end_id:
+            if in_assistant_span:
+                labels[index] = token_id
             in_assistant_span = False
             continue
         if in_assistant_span:
