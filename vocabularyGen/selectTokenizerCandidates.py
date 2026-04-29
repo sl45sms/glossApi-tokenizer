@@ -18,11 +18,21 @@ from repo_tokenizer import load_repo_tokenizer
 
 DEFAULT_INPUT_DB_PATH = Path("artifacts/vocab_candidates/fineweb2_hq_ell_grek_word_counts.sqlite3")
 DEFAULT_INPUT_COUNTS_PATH = Path("artifacts/vocab_candidates/fineweb2_hq_ell_grek_word_counts.json")
+DEFAULT_QUOTED_INPUT_DB_PATH = Path("artifacts/vocab_candidates/fineweb2_hq_ell_grek_quoted_word_counts.sqlite3")
+DEFAULT_CAPITALIZED_INPUT_DB_PATH = Path("artifacts/vocab_candidates/fineweb2_hq_ell_grek_capitalized_word_counts.sqlite3")
 DEFAULT_BASE_TOKENIZER = "artifacts/tokenizers/apertus-base"
 DEFAULT_OUTPUT_TSV_PATH = Path("artifacts/vocab_candidates/fineweb2_hq_ell_grek_candidates.tsv")
 DEFAULT_OUTPUT_TOKENS_PATH = Path("artifacts/vocab_candidates/selected_tokens_v1.txt")
 DEFAULT_REPORT_PATH = Path("artifacts/reports/fineweb2_hq_ell_grek_candidate_selection.json")
 DEFAULT_STATIC_DIR = Path("vocabularyGen/static")
+COUNT_SOURCE_WORDS = "words"
+COUNT_SOURCE_QUOTED = "quoted"
+COUNT_SOURCE_CAPITALIZED = "capitalized"
+COUNT_SOURCE_TABLE_NAMES = {
+    COUNT_SOURCE_WORDS: "word_counts",
+    COUNT_SOURCE_QUOTED: "quoted_word_counts",
+    COUNT_SOURCE_CAPITALIZED: "capitalized_word_counts",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,13 +52,35 @@ def parse_args() -> argparse.Namespace:
         "--db-path",
         type=Path,
         default=DEFAULT_INPUT_DB_PATH,
-        help="SQLite word-count database produced by vocabularyGen/countWords.py.",
+        help="Primary SQLite all-word count database produced by vocabularyGen/countWords.py.",
     )
     parser.add_argument(
         "--counts-path",
         type=Path,
         default=DEFAULT_INPUT_COUNTS_PATH,
-        help="JSON word-count export produced by vocabularyGen/countWords.py.",
+        help="Primary JSON all-word count export produced by vocabularyGen/countWords.py.",
+    )
+    parser.add_argument(
+        "--quoted-db-path",
+        type=Path,
+        default=DEFAULT_QUOTED_INPUT_DB_PATH,
+        help="Optional SQLite quoted-word count database produced by vocabularyGen/countWords.py.",
+    )
+    parser.add_argument(
+        "--capitalized-db-path",
+        type=Path,
+        default=DEFAULT_CAPITALIZED_INPUT_DB_PATH,
+        help="Optional SQLite capitalized-word count database produced by vocabularyGen/countWords.py.",
+    )
+    parser.add_argument(
+        "--skip-quoted-counts",
+        action="store_true",
+        help="Do not combine quoted-word counts even when the quoted SQLite database is available.",
+    )
+    parser.add_argument(
+        "--skip-capitalized-counts",
+        action="store_true",
+        help="Do not combine capitalized-word counts even when the capitalized SQLite database is available.",
     )
     parser.add_argument(
         "--base-tokenizer",
@@ -59,13 +91,13 @@ def parse_args() -> argparse.Namespace:
         "--static-dir",
         type=Path,
         default=DEFAULT_STATIC_DIR,
-        help="Directory of static token files to append. Every non-empty line in every file is read; hyphens are removed.",
+        help="Directory of curated static token files to append. Every non-empty line in each file is read and hyphens are removed.",
     )
     parser.add_argument(
         "--skip-static-files",
         "--skip-static-affixes",
         action="store_true",
-        help="Disable extra token injection from files in the static directory.",
+        help="Disable extra token injection from curated files in the static directory.",
     )
     parser.add_argument(
         "--output-tsv-path",
@@ -230,8 +262,13 @@ def resolve_input_source(args: argparse.Namespace) -> Tuple[str, Path]:
     )
 
 
-def load_rows_from_db(db_path: Path, min_count: int, top_k_input: Optional[int]) -> List[Tuple[str, int]]:
-    query = "SELECT word, count FROM word_counts WHERE count >= ? ORDER BY count DESC, word ASC"
+def load_rows_from_db(
+    db_path: Path,
+    table_name: str,
+    min_count: int,
+    top_k_input: Optional[int],
+) -> List[Tuple[str, int]]:
+    query = f"SELECT word, count FROM {table_name} WHERE count >= ? ORDER BY count DESC, word ASC"
     params: List[Any] = [min_count]
     if top_k_input:
         query += " LIMIT ?"
@@ -267,16 +304,122 @@ def load_rows_from_json(counts_path: Path, min_count: int, top_k_input: Optional
     return rows
 
 
-def load_source_rows(args: argparse.Namespace) -> Tuple[str, Path, List[Tuple[str, int]]]:
+def sort_rows_by_count(rows: Sequence[Tuple[str, int]]) -> List[Tuple[str, int]]:
+    return sorted(rows, key=lambda entry: (-entry[1], entry[0]))
+
+
+def accumulate_source_rows(
+    source_name: str,
+    rows: Sequence[Tuple[str, int]],
+    combined_counts: Dict[str, int],
+    source_counts_by_word: DefaultDict[str, Dict[str, int]],
+) -> None:
+    for word, count in rows:
+        combined_counts[word] = combined_counts.get(word, 0) + count
+        word_source_counts = source_counts_by_word[word]
+        word_source_counts[source_name] = word_source_counts.get(source_name, 0) + count
+
+
+def load_source_rows(args: argparse.Namespace) -> Dict[str, Any]:
     input_format, input_path = resolve_input_source(args)
     top_k_input = None if args.top_k_input == 0 else args.top_k_input
 
     if input_format == "db":
-        rows = load_rows_from_db(input_path, args.min_count, top_k_input)
+        primary_rows = load_rows_from_db(
+            input_path,
+            COUNT_SOURCE_TABLE_NAMES[COUNT_SOURCE_WORDS],
+            args.min_count,
+            top_k_input,
+        )
     else:
-        rows = load_rows_from_json(input_path, args.min_count, top_k_input)
+        primary_rows = load_rows_from_json(input_path, args.min_count, top_k_input)
 
-    return input_format, input_path, rows
+    combined_counts: Dict[str, int] = {}
+    source_counts_by_word: DefaultDict[str, Dict[str, int]] = defaultdict(dict)
+    input_source_stats: Dict[str, Any] = {
+        "combined_row_count_before_merge": 0,
+        "merged_unique_word_count": 0,
+        "included_source_count": 0,
+        "sources": [],
+    }
+
+    accumulate_source_rows(COUNT_SOURCE_WORDS, primary_rows, combined_counts, source_counts_by_word)
+    input_source_stats["combined_row_count_before_merge"] += len(primary_rows)
+    input_source_stats["included_source_count"] += 1
+    input_source_stats["sources"].append(
+        {
+            "name": COUNT_SOURCE_WORDS,
+            "format": input_format,
+            "path": str(input_path),
+            "included": True,
+            "row_count": len(primary_rows),
+        }
+    )
+
+    optional_sources = [
+        (COUNT_SOURCE_QUOTED, args.quoted_db_path, args.skip_quoted_counts),
+        (COUNT_SOURCE_CAPITALIZED, args.capitalized_db_path, args.skip_capitalized_counts),
+    ]
+
+    for source_name, db_path, skip_source in optional_sources:
+        if skip_source:
+            input_source_stats["sources"].append(
+                {
+                    "name": source_name,
+                    "format": "db",
+                    "path": str(db_path),
+                    "included": False,
+                    "row_count": 0,
+                    "reason": "skipped-by-flag",
+                }
+            )
+            continue
+
+        if not db_path.exists():
+            input_source_stats["sources"].append(
+                {
+                    "name": source_name,
+                    "format": "db",
+                    "path": str(db_path),
+                    "included": False,
+                    "row_count": 0,
+                    "reason": "db-not-found",
+                }
+            )
+            continue
+
+        optional_rows = load_rows_from_db(
+            db_path,
+            COUNT_SOURCE_TABLE_NAMES[source_name],
+            args.min_count,
+            top_k_input,
+        )
+        accumulate_source_rows(source_name, optional_rows, combined_counts, source_counts_by_word)
+        input_source_stats["combined_row_count_before_merge"] += len(optional_rows)
+        input_source_stats["included_source_count"] += 1
+        input_source_stats["sources"].append(
+            {
+                "name": source_name,
+                "format": "db",
+                "path": str(db_path),
+                "included": True,
+                "row_count": len(optional_rows),
+            }
+        )
+
+    merged_rows = sort_rows_by_count(list(combined_counts.items()))
+    input_source_stats["merged_unique_word_count"] = len(merged_rows)
+
+    return {
+        "primary_input_format": input_format,
+        "primary_input_path": input_path,
+        "rows": merged_rows,
+        "source_counts_by_word": {
+            word: dict(sorted(source_counts.items()))
+            for word, source_counts in source_counts_by_word.items()
+        },
+        "input_source_stats": input_source_stats,
+    }
 
 
 def filter_source_rows(args: argparse.Namespace, rows: Sequence[Tuple[str, int]]) -> Tuple[List[Tuple[str, int]], Dict[str, int]]:
@@ -353,6 +496,22 @@ def collapse_case_variants(
 
     collapsed_rows.sort(key=lambda entry: (-entry[1], entry[0]))
     return collapsed_rows, variant_details, stats
+
+
+def build_representative_source_details(
+    variant_details: Dict[str, Dict[str, int]],
+    source_counts_by_word: Dict[str, Dict[str, int]],
+) -> Dict[str, Dict[str, int]]:
+    representative_source_details: Dict[str, Dict[str, int]] = {}
+
+    for representative, variants in variant_details.items():
+        aggregated_source_counts: Dict[str, int] = {}
+        for variant_word in variants:
+            for source_name, count in source_counts_by_word.get(variant_word, {}).items():
+                aggregated_source_counts[source_name] = aggregated_source_counts.get(source_name, 0) + count
+        representative_source_details[representative] = dict(sorted(aggregated_source_counts.items()))
+
+    return representative_source_details
 
 
 def sanitize_static_entry(raw_entry: str, strip_hyphen: bool) -> str:
@@ -456,6 +615,7 @@ def select_candidates(
     rows: Sequence[Tuple[str, int]],
     base_tokenizer,
     variant_details: Dict[str, Dict[str, int]],
+    representative_source_details: Dict[str, Dict[str, int]],
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     stats = {
         "scored_rows": 0,
@@ -479,12 +639,15 @@ def select_candidates(
 
             base_fragmentation = max(base_token_count - 1, 0)
             utility_score = count * base_fragmentation
+            source_counts = dict(representative_source_details.get(word, {COUNT_SOURCE_WORDS: count}))
 
             selected_candidates.append(
                 {
                     "word": word,
                     "token": f" {word}",
                     "count": count,
+                    "count_sources": ",".join(source_counts),
+                    "source_counts": source_counts,
                     "source_type": "corpus",
                     "static_source_files": "",
                     "source_variant_count": len(variant_details.get(word, {word: count})),
@@ -497,10 +660,47 @@ def select_candidates(
 
     stats["selected_before_cap"] = len(selected_candidates)
     selected_candidates.sort(key=candidate_sort_key)
-    if args.max_selected:
-        selected_candidates = selected_candidates[: args.max_selected]
     stats["selected_after_cap"] = len(selected_candidates)
     return selected_candidates, stats
+
+
+def apply_total_selection_cap(
+    args: argparse.Namespace,
+    selected_candidates: Sequence[Dict[str, Any]],
+    static_candidates: Sequence[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+    cap_stats: Dict[str, Any] = {
+        "max_selected": None if args.max_selected == 0 else args.max_selected,
+        "corpus_candidates_before_cap": len(selected_candidates),
+        "static_candidates_before_cap": len(static_candidates),
+    }
+
+    if not args.max_selected:
+        cap_stats.update(
+            {
+                "corpus_candidates_after_cap": len(selected_candidates),
+                "static_candidates_after_cap": len(static_candidates),
+                "total_candidates_after_cap": len(selected_candidates) + len(static_candidates),
+                "dropped_corpus_candidates": 0,
+                "dropped_static_candidates": 0,
+            }
+        )
+        return list(selected_candidates), list(static_candidates), cap_stats
+
+    kept_static_candidates = list(static_candidates[: args.max_selected])
+    remaining_corpus_slots = max(args.max_selected - len(kept_static_candidates), 0)
+    kept_selected_candidates = list(selected_candidates[:remaining_corpus_slots])
+
+    cap_stats.update(
+        {
+            "corpus_candidates_after_cap": len(kept_selected_candidates),
+            "static_candidates_after_cap": len(kept_static_candidates),
+            "total_candidates_after_cap": len(kept_selected_candidates) + len(kept_static_candidates),
+            "dropped_corpus_candidates": len(selected_candidates) - len(kept_selected_candidates),
+            "dropped_static_candidates": len(static_candidates) - len(kept_static_candidates),
+        }
+    )
+    return kept_selected_candidates, kept_static_candidates, cap_stats
 
 
 def build_static_candidates(
@@ -512,6 +712,7 @@ def build_static_candidates(
     stats: Dict[str, Any] = {
         "input_group_count": len(static_token_groups),
         "exact_single_token_in_base": 0,
+        "skipped_exact_single_token_in_base": 0,
         "already_selected_by_token": 0,
         "missing_static_candidates": 0,
     }
@@ -522,6 +723,8 @@ def build_static_candidates(
         exact_single_token, token_ids = has_exact_single_token_coverage(base_tokenizer, word)
         if exact_single_token:
             stats["exact_single_token_in_base"] += 1
+            stats["skipped_exact_single_token_in_base"] += 1
+            continue
 
         if word in existing_token_set:
             stats["already_selected_by_token"] += 1
@@ -532,6 +735,8 @@ def build_static_candidates(
                 "word": word,
                 "token": word,
                 "count": 0,
+                "count_sources": "",
+                "source_counts": {},
                 "source_type": "static",
                 "static_source_files": ",".join(static_group["source_files"]),
                 "source_variant_count": len(static_group["raw_entries"]),
@@ -577,6 +782,8 @@ def write_candidate_tsv(path: Path, selected_candidates: Sequence[Dict[str, Any]
                 "word",
                 "token",
                 "count",
+                "count_sources",
+                "source_counts_json",
                 "source_type",
                 "static_source_files",
                 "source_variant_count",
@@ -591,6 +798,8 @@ def write_candidate_tsv(path: Path, selected_candidates: Sequence[Dict[str, Any]
                     candidate["word"],
                     candidate["token"],
                     candidate["count"],
+                    candidate.get("count_sources", ""),
+                    json.dumps(candidate.get("source_counts", {}), ensure_ascii=False, sort_keys=True),
                     candidate["source_type"],
                     candidate["static_source_files"],
                     candidate["source_variant_count"],
@@ -617,9 +826,13 @@ def main() -> None:
     validate_args(args)
     prepare_paths(args)
 
-    input_format, input_path, source_rows = load_source_rows(args)
-    filtered_rows, source_filter_stats = filter_source_rows(args, source_rows)
+    source_bundle = load_source_rows(args)
+    filtered_rows, source_filter_stats = filter_source_rows(args, source_bundle["rows"])
     collapsed_rows, variant_details, case_variant_stats = collapse_case_variants(args, filtered_rows)
+    representative_source_details = build_representative_source_details(
+        variant_details,
+        source_bundle["source_counts_by_word"],
+    )
 
     base_tokenizer = load_repo_tokenizer(
         args.base_tokenizer,
@@ -631,6 +844,7 @@ def main() -> None:
         collapsed_rows,
         base_tokenizer,
         variant_details,
+        representative_source_details,
     )
 
     static_token_groups, static_input_stats = load_static_token_groups(args)
@@ -639,6 +853,11 @@ def main() -> None:
         base_tokenizer,
         [candidate["token"] for candidate in selected_candidates],
     )
+    selected_candidates, static_candidates, selection_cap_stats = apply_total_selection_cap(
+        args,
+        selected_candidates,
+        static_candidates,
+    )
     all_selected_candidates = selected_candidates + static_candidates
 
     write_candidate_tsv(args.output_tsv_path, all_selected_candidates)
@@ -646,9 +865,10 @@ def main() -> None:
 
     report = {
         "input": {
-            "format": input_format,
-            "path": str(input_path),
+            "format": source_bundle["primary_input_format"],
+            "path": str(source_bundle["primary_input_path"]),
         },
+        "input_sources": source_bundle["input_source_stats"],
         "tokenizers": {
             "base_tokenizer": args.base_tokenizer,
         },
@@ -661,6 +881,8 @@ def main() -> None:
             "include_non_greek": args.include_non_greek,
             "preserve_case_variants": args.preserve_case_variants,
             "min_base_token_count": args.min_base_token_count,
+            "skip_quoted_counts": args.skip_quoted_counts,
+            "skip_capitalized_counts": args.skip_capitalized_counts,
             "skip_static_files": args.skip_static_files,
             "batch_size": args.batch_size,
         },
@@ -668,6 +890,7 @@ def main() -> None:
         "source_filter_stats": source_filter_stats,
         "case_variant_stats": case_variant_stats,
         "selection_stats": selection_stats,
+        "selection_cap_stats": selection_cap_stats,
         "static_input_stats": static_input_stats,
         "static_stats": static_stats,
         "outputs": {
