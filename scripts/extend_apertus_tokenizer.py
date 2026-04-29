@@ -1,4 +1,8 @@
-# this script is meant to be run after selecting new tokens for addition to the Apertus tokenizer, and it will load the base Apertus tokenizer, add the new tokens, and save the extended tokenizer along with a JSON report describing the changes. Optionally, if a base model checkpoint is provided, it will also resize the model's token embeddings and initialize the new embeddings by mean-pooling over the original subtoken embeddings corresponding to each new token.
+# this script is meant to be run after selecting new tokens for addition to the Apertus tokenizer, 
+# and it will load the base Apertus tokenizer, add the new tokens, and save the extended tokenizer 
+# along with a JSON report describing the changes. 
+# Optionally, if a base model checkpoint is provided, 
+# it will also resize the model's token embeddings and initialize the new embeddings by mean-pooling over the original subtoken embeddings corresponding to each new token.
 import argparse
 import json
 import os
