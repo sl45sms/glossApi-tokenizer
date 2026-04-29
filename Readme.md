@@ -155,14 +155,18 @@ The UI sends each non-empty line of input text to `scripts/compare_tokenizers.py
 
 After extracting tokenizers, you can mine frequent Greek words from FineWeb2-HQ and turn them into a ranked candidate token list.
 
-First, count words from the Greek `ell_Grek` split:
+First, run the unified counter on the Greek `ell_Grek` split. The same script can export regular word counts plus quoted and capitalized static candidate lists in one pass:
 
 ```bash
 ./run_uenv.sh python vocabularyGen/countWords.py \
+  --count-modes words quoted capitalized \
   --min-count 5 \
   --report-every 10000 \
   --overwrite
 ```
+
+That writes the regular word-count artifacts plus, when the corresponding count modes are enabled, the generated text exports `artifacts/vocab_candidates/fineweb2_hq_ell_grek_quoted_words.txt` and `artifacts/vocab_candidates/fineweb2_hq_ell_grek_capitalized_words.txt` together with their SQLite sidecars.
+Capitalized mode preserves observed uppercase-initial forms so sentence-initial variants and proper-name-like words still influence the merged selector ranking through the capitalized SQLite source. If you later want an exact unspaced surface form, copy only the entries you actually want into a curated file under `vocabularyGen/static/`.
 
 Then rank candidate tokens against the saved Apertus tokenizer:
 
@@ -180,7 +184,7 @@ This produces:
 - `artifacts/vocab_candidates/selected_tokens_v1.txt`
 - `artifacts/reports/fineweb2_hq_ell_grek_candidate_selection.json`
 
-The selector uses only the base Apertus tokenizer. By default it keeps words that currently require at least 3 base tokens, ranks them by frequency and base-tokenizer fragmentation, collapses case variants so lowercase forms are preferred over duplicate capitalized forms, and appends cleaned affixes from `vocabularyGen/static/epithemata.txt` and `vocabularyGen/static/prothimata.txt` when those affixes are missing as exact single tokens in the base tokenizer.
+The selector uses only the base Apertus tokenizer. By default it combines the regular word-count database with the quoted-word and capitalized-word SQLite outputs when they exist, ranks that merged catalog by frequency and base-tokenizer fragmentation, collapses case variants so lowercase forms are preferred over duplicate capitalized forms, and then appends cleaned curated static candidates from `vocabularyGen/static/`.
 
 ### 7. Build the extended Apertus tokenizer
 
@@ -213,6 +217,6 @@ The script reads the selected token list, skips entries that already exist in th
 - `visualizer/app.py` provides a local Gradio UI on `http://localhost:7860/` and shells out to `scripts/compare_tokenizers.py` for the actual comparison.
 - Many modern tokenizers use an internal byte-level representation, so raw vocabulary entries can look like mojibake such as `ÏĦÎ¹ÎºÎ¬`. The comparison script prints decoded token pieces for readability, and `tokenizer_readable.json` applies the same idea to the saved tokenizer export where it is safe to do so.
 - Hugging Face downloads worked without authentication here, but the CLI warns that setting `HF_TOKEN` is recommended for better rate limits.
-- `vocabularyGen/countWords.py` streams the FineWeb2-HQ Greek split through `uenv`, keeps exact counts in SQLite during the run, and exports a JSON frequency list.
+- `vocabularyGen/countWords.py` is the unified FineWeb2-HQ Greek preprocessor: it streams through `uenv`, keeps exact counts in SQLite during the run, exports the JSON frequency list, and can optionally emit quoted and capitalized static candidate lists in the same pass.
 - `vocabularyGen/selectTokenizerCandidates.py` turns those counts into a ranked token candidate list using only the base tokenizer, with a configurable minimum base token count that defaults to 3.
 - `scripts/extend_apertus_tokenizer.py` consumes `artifacts/vocab_candidates/selected_tokens_v1.txt` and writes the extended tokenizer under `artifacts/tokenizers/apertus-greek-v1`.
