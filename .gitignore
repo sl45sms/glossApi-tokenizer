@@ -8,4 +8,7 @@ core_*
 *.out
 *.log
 *.tmp
+*.json
+*.parquet
+*.csv
 pnotes.md
