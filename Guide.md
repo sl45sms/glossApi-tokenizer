@@ -59,11 +59,11 @@ that creates the main word-count JSON plus the generated text exports `artifacts
 ```bash
 ./run_uenv.sh python vocabularyGen/selectTokenizerCandidates.py \
   --min-count 5 \
-  --min-base-token-count 3 \
-  --max-selected 20000 \
+  --min-base-token-count 4 \
+  --max-selected 5000 \
   --overwrite
 ```
-that writes `artifacts/vocab_candidates/fineweb2_hq_ell_grek_candidates.tsv`, `artifacts/vocab_candidates/selected_tokens_v1.txt`, and `artifacts/reports/fineweb2_hq_ell_grek_candidate_selection.json` for the next step. The selector merges the regular, quoted, and capitalized SQLite count sources and only then appends curated static tokens from `vocabularyGen/static/`.
+that writes `artifacts/vocab_candidates/fineweb2_hq_ell_grek_candidates.tsv`, `artifacts/vocab_candidates/selected_tokens_v1.txt`, and `artifacts/reports/fineweb2_hq_ell_grek_candidate_selection.json` for the next step. The selector merges the regular, quoted, and capitalized SQLite count sources, keeps a stricter default guard for very frequent corpus words, and only then appends curated static tokens from `vocabularyGen/static/`.
 
 ### A3. Build tokenizer and aligned init checkpoint
 
@@ -74,6 +74,7 @@ that writes `artifacts/vocab_candidates/fineweb2_hq_ell_grek_candidates.tsv`, `a
   --torch-dtype bfloat16 \
   --overwrite
 ```
+By default, the script mean-initializes the new input embeddings from the original subtoken decomposition and uses a more conservative zero initialization for untied output-head rows. If you explicitly want the older untied-head behavior, pass `--untied-output-init-strategy mean`.
 
 ### A4. Validation gate for aligned init
 
