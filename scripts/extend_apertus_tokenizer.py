@@ -109,6 +109,16 @@ def parse_args() -> argparse.Namespace:
         help="Torch dtype to use when loading --base-model.",
     )
     parser.add_argument(
+        "--untied-output-init-strategy",
+        choices=("zero", "mean", "keep-resized"),
+        default="zero",
+        help=(
+            "How to initialize new lm_head rows when input and output embeddings are not tied. "
+            "'zero' is the conservative default for aligned-init stability, 'mean' copies the mean of the "
+            "source output rows, and 'keep-resized' leaves the resized-model initializer untouched."
+        ),
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Replace an existing output directory or report files.",
@@ -276,6 +286,26 @@ def build_initialization_samples(
     return samples
 
 
+def initialize_untied_output_embedding_row(
+    output_embeddings,
+    new_token_id: int,
+    source_ids: Sequence[int],
+    strategy: str,
+) -> str:
+    if strategy == "mean":
+        output_embeddings[new_token_id].copy_(output_embeddings[source_ids].mean(dim=0))
+        return "mean"
+
+    if strategy == "zero":
+        output_embeddings[new_token_id].zero_()
+        return "zero"
+
+    if strategy == "keep-resized":
+        return "keep-resized"
+
+    raise ValueError(f"Unsupported untied output init strategy: {strategy}")
+
+
 def initialize_model_embeddings(
     args: argparse.Namespace,
     tokenizer,
@@ -303,7 +333,11 @@ def initialize_model_embeddings(
 
     initialized_input_count = 0
     initialized_output_count = 0
+    zero_initialized_output_count = 0
+    mean_initialized_output_count = 0
+    kept_resized_output_count = 0
     source_length_histogram: Dict[str, int] = {}
+    output_init_strategy = "shared-with-input" if output_embeddings_share_storage else args.untied_output_init_strategy
 
     with torch.no_grad():
         for token in tokens_to_add:
@@ -316,8 +350,20 @@ def initialize_model_embeddings(
             initialized_input_count += 1
 
             if output_embeddings is not None and not output_embeddings_share_storage:
-                output_embeddings[new_token_id].copy_(output_embeddings[source_ids].mean(dim=0))
-                initialized_output_count += 1
+                applied_output_strategy = initialize_untied_output_embedding_row(
+                    output_embeddings,
+                    new_token_id,
+                    source_ids,
+                    args.untied_output_init_strategy,
+                )
+                if applied_output_strategy == "mean":
+                    initialized_output_count += 1
+                    mean_initialized_output_count += 1
+                elif applied_output_strategy == "zero":
+                    initialized_output_count += 1
+                    zero_initialized_output_count += 1
+                elif applied_output_strategy == "keep-resized":
+                    kept_resized_output_count += 1
             elif output_embeddings is not None:
                 initialized_output_count += 1
 
@@ -337,6 +383,10 @@ def initialize_model_embeddings(
         "initialized_input_embeddings": initialized_input_count,
         "initialized_output_embeddings": initialized_output_count,
         "output_embeddings_share_storage": output_embeddings_share_storage,
+        "output_embedding_initialization_strategy": output_init_strategy,
+        "mean_initialized_output_embeddings": mean_initialized_output_count,
+        "zero_initialized_output_embeddings": zero_initialized_output_count,
+        "kept_resized_output_embeddings": kept_resized_output_count,
         "source_subtoken_count_histogram": source_length_histogram,
         "tokenizer_saved_with_model": True,
         "samples": build_initialization_samples(tokenizer, initialization_source_ids, args.sample_limit),
