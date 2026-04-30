@@ -358,6 +358,7 @@ Use `scripts/extend_apertus_tokenizer.py` with `--base-model` to create that ali
 Notes:
 
 - When `--base-model` is enabled, the script loads the full base LM in order to resize and initialize the new embeddings. Run this step on a machine or job with enough memory.
+- The current default keeps mean initialization for new input embeddings but uses a conservative zero initialization for untied output-head rows. If you explicitly want the older untied-head behavior, pass `--untied-output-init-strategy mean`.
 - If you already have an initialized checkpoint at a persistent path such as `/capstor/store/cscs/swissai/a0140/p-skarvelis/apertus-greek-init`, reuse it and point `CPT/cpt.py` there.
 - The resulting checkpoint directory is the value that should go into `model_path` in `CPT/cpt.py`.
 
