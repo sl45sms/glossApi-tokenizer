@@ -39,7 +39,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Select tokenizer candidate tokens from counted Greek words by keeping words that the base "
-            "tokenizer splits into at least N pieces and ranking them by frequency-weighted fragmentation."
+            "tokenizer splits into at least N pieces in the exact exported token form and ranking them by "
+            "frequency-weighted fragmentation."
         )
     )
     parser.add_argument(
@@ -161,7 +162,25 @@ def parse_args() -> argparse.Namespace:
         "--min-base-token-count",
         type=int,
         default=3,
-        help="Only keep words that currently require at least this many base-tokenizer tokens.",
+        help="Only keep corpus candidates whose exact exported token form currently requires at least this many base-tokenizer tokens.",
+    )
+    parser.add_argument(
+        "--high-frequency-count-threshold",
+        type=int,
+        default=250000,
+        help=(
+            "For very frequent corpus words, require a stricter fragmentation threshold to avoid retokenizing "
+            "too much common general vocabulary at once. Use 0 to disable this guard."
+        ),
+    )
+    parser.add_argument(
+        "--min-base-token-count-high-frequency",
+        type=int,
+        default=4,
+        help=(
+            "Minimum base-token count to require once --high-frequency-count-threshold is met. This only "
+            "applies to corpus-derived candidates."
+        ),
     )
     parser.add_argument(
         "--batch-size",
@@ -211,6 +230,14 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--max-word-length must be at least --min-word-length.")
     if args.min_base_token_count <= 0:
         raise SystemExit("--min-base-token-count must be greater than 0.")
+    if args.high_frequency_count_threshold < 0:
+        raise SystemExit("--high-frequency-count-threshold cannot be negative.")
+    if args.min_base_token_count_high_frequency <= 0:
+        raise SystemExit("--min-base-token-count-high-frequency must be greater than 0.")
+    if args.min_base_token_count_high_frequency < args.min_base_token_count:
+        raise SystemExit(
+            "--min-base-token-count-high-frequency must be at least --min-base-token-count."
+        )
     if args.batch_size <= 0:
         raise SystemExit("--batch-size must be greater than 0.")
     if args.example_limit < 0:
@@ -601,6 +628,10 @@ def has_exact_single_token_coverage(tokenizer, word: str) -> Tuple[bool, List[in
     return len(token_ids) == 1 and decoded == word, token_ids
 
 
+def build_corpus_candidate_token(word: str) -> str:
+    return f" {word}"
+
+
 def candidate_sort_key(candidate: Dict[str, Any]) -> Tuple[Any, ...]:
     return (
         -candidate["utility_score"],
@@ -608,6 +639,13 @@ def candidate_sort_key(candidate: Dict[str, Any]) -> Tuple[Any, ...]:
         -candidate["count"],
         candidate["word"],
     )
+
+
+def required_base_token_count_for_candidate(args: argparse.Namespace, count: int) -> int:
+    required_count = args.min_base_token_count
+    if args.high_frequency_count_threshold and count >= args.high_frequency_count_threshold:
+        required_count = max(required_count, args.min_base_token_count_high_frequency)
+    return required_count
 
 
 def select_candidates(
@@ -620,21 +658,26 @@ def select_candidates(
     stats = {
         "scored_rows": 0,
         "skipped_below_token_threshold": 0,
+        "skipped_high_frequency_under_stricter_threshold": 0,
         "selected_before_cap": 0,
     }
     selected_candidates: List[Dict[str, Any]] = []
 
     for batch in batched(rows, args.batch_size):
-        words = [word for word, _ in batch]
-        base_inputs = base_tokenizer(words, add_special_tokens=False)
+        candidate_tokens = [build_corpus_candidate_token(word) for word, _ in batch]
+        base_inputs = base_tokenizer(candidate_tokens, add_special_tokens=False)
         base_input_ids = base_inputs["input_ids"]
 
         for index, (word, count) in enumerate(batch):
             stats["scored_rows"] += 1
+            candidate_token = candidate_tokens[index]
 
             base_token_count = len(base_input_ids[index])
-            if base_token_count < args.min_base_token_count:
+            required_base_token_count = required_base_token_count_for_candidate(args, count)
+            if base_token_count < required_base_token_count:
                 stats["skipped_below_token_threshold"] += 1
+                if required_base_token_count > args.min_base_token_count:
+                    stats["skipped_high_frequency_under_stricter_threshold"] += 1
                 continue
 
             base_fragmentation = max(base_token_count - 1, 0)
@@ -644,7 +687,7 @@ def select_candidates(
             selected_candidates.append(
                 {
                     "word": word,
-                    "token": f" {word}",
+                    "token": candidate_token,
                     "count": count,
                     "count_sources": ",".join(source_counts),
                     "source_counts": source_counts,
@@ -654,6 +697,7 @@ def select_candidates(
                     "source_variants": variant_details.get(word, {word: count}),
                     "base_token_count": base_token_count,
                     "base_fragmentation": base_fragmentation,
+                    "required_base_token_count": required_base_token_count,
                     "utility_score": utility_score,
                 }
             )
@@ -765,9 +809,11 @@ def build_examples(
     examples: List[Dict[str, Any]] = []
     for candidate in selected_candidates[:limit]:
         word = candidate["word"]
-        base_ids = base_tokenizer.encode(word, add_special_tokens=False)
+        scored_token = candidate["token"]
+        base_ids = base_tokenizer.encode(scored_token, add_special_tokens=False)
         example = dict(candidate)
         example.setdefault("source_variants", {word: candidate["count"]})
+        example["base_scored_text"] = scored_token
         example["base_decoded_pieces"] = decode_token_ids(base_tokenizer, base_ids)
 
         examples.append(example)
@@ -881,6 +927,11 @@ def main() -> None:
             "include_non_greek": args.include_non_greek,
             "preserve_case_variants": args.preserve_case_variants,
             "min_base_token_count": args.min_base_token_count,
+            "high_frequency_count_threshold": None
+            if args.high_frequency_count_threshold == 0
+            else args.high_frequency_count_threshold,
+            "min_base_token_count_high_frequency": args.min_base_token_count_high_frequency,
+            "corpus_scoring_text_form": "leading-space exported token",
             "skip_quoted_counts": args.skip_quoted_counts,
             "skip_capitalized_counts": args.skip_capitalized_counts,
             "skip_static_files": args.skip_static_files,
