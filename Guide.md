@@ -60,6 +60,7 @@ that creates the main word-count JSON plus the generated text exports `artifacts
 ./run_uenv.sh python vocabularyGen/selectTokenizerCandidates.py \
   --min-count 5 \
   --min-base-token-count 4 \
+  --min-base-token-count-high-frequency 5 \
   --max-selected 5000 \
   --overwrite
 ```
