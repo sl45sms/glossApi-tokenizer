@@ -233,6 +233,52 @@ Acceptance rule:
 - Only continue from the best CPT checkpoint that is stable or improved.
 - If it is still clearly worse than base, do not move to SFT yet.
 
+### C4. Evaluate all saved CPT checkpoints, not just `final`
+
+Do not assume the final checkpoint is the best checkpoint.
+
+Run the checkpoint sweep tool on the whole CPT run directory:
+
+```bash
+./run_uenv.sh python tools/evaluateCptCheckpoints.py \
+  --run-dir ${CAPSTOR_ROOT}/apertus-greek-cpt-full-1btok-500steps \
+  --output-dir artifacts/reports/greek_mmlu_cpt_full_checkpoint_sweep
+```
+
+For continuation runs, pass the continuation run directory instead:
+
+```bash
+./run_uenv.sh python tools/evaluateCptCheckpoints.py \
+  --run-dir ${CAPSTOR_ROOT}/apertus-greek-cpt-full-1btok-500steps-continue-lr1e5-200steps-v2 \
+  --output-dir artifacts/reports/greek_mmlu_cpt_full_continue_checkpoint_sweep
+```
+
+What the tool does:
+
+- evaluates every saved full-phase `checkpoint-*` plus `final`
+- builds temporary tokenizer-aware eval views for intermediate Trainer checkpoints, because those checkpoint directories do not carry tokenizer files by default
+- writes one GreekMMLU JSON report per checkpoint
+- writes `summary.json` and `summary.tsv` with overall accuracy plus key tie-break slices
+
+### C5. Choose the CPT checkpoint to promote
+
+Use the checkpoint sweep results, not intuition from the training loss curve.
+
+Promotion logic:
+
+- Compare checkpoints only within the same lineage first.
+- Pick the checkpoint with the highest overall GreekMMLU accuracy as the lineage champion.
+- If two checkpoints are effectively tied, prefer the earlier checkpoint with less regression on `Social Sciences`, `Modern Greek Language`, and `Secondary School`.
+- Do not replace the current CPT champion with a later checkpoint that scores worse overall.
+- Do not move to SFT if the best checkpoint in the lineage is still clearly worse than base.
+
+Practical reading rule:
+
+- `final` is only a candidate, not the default winner.
+- A continuation run is only useful if one of its saved checkpoints beats the previous CPT champion.
+- Once you pick the champion checkpoint, use that exact path everywhere after that: EOS checks, UI probing, SFT dataset preparation, and SFT training.
+
+use `export MODEL_PATH=${CAPSTOR_ROOT}/apertus-greek-cpt-full-1btok-500steps/checkpoint-XXXX` to set the champion checkpoint for the next stages, not `final` by default.
 
 ## 7. Stage D: Manual EOS And Chat-Format Checks
 
@@ -240,7 +286,7 @@ Before SFT, run a quick manual probe with the fixed EOS tool.
 
 ```bash
 ./run_uenv.sh python tools/analyzeEos.py \
-  --model-path ${CAPSTOR_ROOT}/apertus-greek-cpt-full-1btok-500steps/final \
+  --model-path ${MODEL_PATH} \
   --device cuda \
   --max-new-tokens 128
 ```
@@ -257,7 +303,7 @@ You can also inspect the same checkpoint in the UI:
 APERTUS_MODEL_UI_PORT=8631 ./run_model_ui.sh \
   --base-device cuda:0 \
   --device cuda:1 \
-  --model-path ${CAPSTOR_ROOT}/apertus-greek-cpt-full-1btok-500steps/final
+  --model-path ${MODEL_PATH}
 ```
 
 
@@ -269,7 +315,7 @@ Use the exact same CPT checkpoint lineage that passed the CPT gate.
 OVERWRITE=1 \
 VALIDATION_SAMPLES=2048 \
 MAX_SEQ_LENGTH=1024 \
-MODEL_PATH=${CAPSTOR_ROOT}/apertus-greek-cpt-full-1btok-500steps/final \
+MODEL_PATH=${MODEL_PATH} \
 sbatch scripts/run_prepare_sft_dataset_clariden.sh
 ```
 
@@ -287,7 +333,7 @@ Do not jump directly into a long multi-node SFT run.
 ```bash
 SMOKE_TEST=1 \
 VALIDATION_SAMPLES=16 \
-MODEL_PATH=${CAPSTOR_ROOT}/apertus-greek-cpt-full-1btok-500steps/final \
+MODEL_PATH=${MODEL_PATH} \
 PREPARED_DATASET_DIR=${IOPS_ROOT}/prepared-datasets/apertus-greek-sft-1024-left-val2048 \
 OUTPUT_DIR=${CAPSTOR_ROOT}/apertus-greek-sft-smoke \
 sbatch --nodes=1 SFT/run_apertus_greek_sft_clariden.sh
@@ -301,7 +347,7 @@ Then probe EOS again on the smoke checkpoint or final smoke output.
 Only after the SFT smoke test looks sane:
 
 ```bash
-MODEL_PATH=${CAPSTOR_ROOT}/apertus-greek-cpt-full-1btok-500steps/final \
+MODEL_PATH=${MODEL_PATH} \
 PREPARED_DATASET_DIR=${IOPS_ROOT}/prepared-datasets/apertus-greek-sft-1024-left-val2048 \
 VALIDATION_SAMPLES=2048 \
 OUTPUT_DIR=${CAPSTOR_ROOT}/apertus-greek-sft-full-1btok-500steps \
@@ -312,7 +358,7 @@ Resume from the latest checkpoint if the job hits the 12-hour limit:
 
 ```bash
 RESUME_FROM_CHECKPOINT=${CAPSTOR_ROOT}/apertus-greek-sft-full-1btok-500steps/checkpoint-XXXX \
-MODEL_PATH=${CAPSTOR_ROOT}/apertus-greek-cpt-full-1btok-500steps/final \
+MODEL_PATH=${MODEL_PATH} \
 PREPARED_DATASET_DIR=${IOPS_ROOT}/prepared-datasets/apertus-greek-sft-1024-left-val2048 \
 VALIDATION_SAMPLES=2048 \
 OUTPUT_DIR=${CAPSTOR_ROOT}/apertus-greek-sft-full-1btok-500steps \
@@ -325,7 +371,7 @@ sbatch --nodes=4 --time=12:00:00 SFT/run_apertus_greek_sft_clariden_multinode.sh
 ```bash
 ./run_uenv.sh python evaluation/evaluate_greek_mmlu.py \
   --base-model ${BASE_MODEL} \
-  --trained-model ${CAPSTOR_ROOT}/apertus-greek-sft-full-1btok-500steps \
+  --trained-model ${MODEL_PATH} \
   --output-json artifacts/reports/greek_mmlu_sft_final_eval.json
 ```
 
