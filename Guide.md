@@ -155,7 +155,6 @@ export SKIP_WARMUP=0
 export WARMUP_MAX_STEPS=25
 export FULL_MAX_STEPS=75
 export FULL_WARMUP_STEPS=10
-
 sbatch --nodes=8 --time=12:00:00 scripts/run_apertus_greek_cpt_clariden_multinode.sh
 ```
 
@@ -201,6 +200,7 @@ This gives a dataset large enough that a few hundred steps are no longer repeate
 ### C2. Run the first production CPT pass
 
 ```bash
+export SAVE_TOTAL_LIMIT=all
 export CE_ENVIRONMENT=apertus-greek-clariden
 export MODEL_PATH=${INIT_MODEL}
 export OUTPUT_DIR=${CAPSTOR_ROOT}/apertus-greek-cpt-full-1btok-500steps
@@ -216,8 +216,7 @@ export SKIP_WARMUP=0
 export WARMUP_MAX_STEPS=100
 export FULL_MAX_STEPS=400
 export FULL_WARMUP_STEPS=50
-
-sbatch --nodes=8 --time=12:00:00 scripts/run_apertus_greek_cpt_clariden_multinode.sh
+sbatch --nodes=16 --time=12:00:00 scripts/run_apertus_greek_cpt_clariden_multinode.sh
 ```
 
 ### C3. Validation gate for production CPT
