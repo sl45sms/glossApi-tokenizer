@@ -135,8 +135,6 @@ $$
 114{,}731{,}008 / 524{,}288 \approx 219 \text{ steps}
 $$
 
-So the old 400-step and 1000-step curated runs were already too much.
-
 ### B3. Run a short CPT probe only
 
 Use a small step budget that stays well below one full pass.
@@ -158,7 +156,7 @@ export WARMUP_MAX_STEPS=25
 export FULL_MAX_STEPS=75
 export FULL_WARMUP_STEPS=10
 
-sbatch --nodes=4 --time=12:00:00 scripts/run_apertus_greek_cpt_clariden_multinode.sh
+sbatch --nodes=8 --time=12:00:00 scripts/run_apertus_greek_cpt_clariden_multinode.sh
 ```
 
 ### B4. Validation gate for the probe
@@ -219,7 +217,7 @@ export WARMUP_MAX_STEPS=100
 export FULL_MAX_STEPS=400
 export FULL_WARMUP_STEPS=50
 
-sbatch --nodes=4 --time=12:00:00 scripts/run_apertus_greek_cpt_clariden_multinode.sh
+sbatch --nodes=8 --time=12:00:00 scripts/run_apertus_greek_cpt_clariden_multinode.sh
 ```
 
 ### C3. Validation gate for production CPT
@@ -352,9 +350,9 @@ Before moving from one stage to the next, verify all of the following:
 - You do not run long CPT on the small curated 1GB dataset.
 
 
-## 13. What Not To Repeat
+## 13. What Not To Do
 
-Do not do these again:
+Do not do these:
 
 - do not use the 1GB curated targeted dataset for 400-1000 total CPT steps at global batch 256
 - do not compare one CPT checkpoint in eval and a different one in SFT prep/training
