@@ -35,6 +35,23 @@ DEFAULT_TEXT_COLUMN = "text"
 DEFAULT_RUN_NAME = "apertus-greek-cpt"
 
 
+def parse_save_total_limit(value: str) -> int | None:
+    normalized = value.strip().lower()
+    if normalized in {"all", "none", "unlimited", "infinite", "inf"}:
+        return None
+
+    try:
+        parsed_value = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "--save-total-limit must be a positive integer or one of: all, none, unlimited."
+        ) from exc
+
+    if parsed_value <= 0:
+        raise argparse.ArgumentTypeError("--save-total-limit must be positive.")
+    return parsed_value
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -228,9 +245,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--save-total-limit",
-        type=int,
+        type=parse_save_total_limit,
         default=3,
-        help="Maximum number of Trainer checkpoints to retain per phase.",
+        help="Maximum number of Trainer checkpoints to retain per phase. Use 'all' to keep every checkpoint.",
     )
     parser.add_argument(
         "--lr-scheduler-type",
@@ -332,7 +349,7 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--logging-steps must be positive.")
     if args.save_steps <= 0:
         raise SystemExit("--save-steps must be positive.")
-    if args.save_total_limit <= 0:
+    if args.save_total_limit is not None and args.save_total_limit <= 0:
         raise SystemExit("--save-total-limit must be positive.")
     if args.warmup_max_steps < 0 or args.full_max_steps < 0:
         raise SystemExit("Phase step counts cannot be negative.")
@@ -718,7 +735,6 @@ def training_arguments(
         "logging_steps": logging_steps,
         "save_strategy": save_strategy,
         "save_steps": save_steps,
-        "save_total_limit": args.save_total_limit,
         "lr_scheduler_type": args.lr_scheduler_type,
         "dataloader_num_workers": args.dataloader_num_workers,
         "gradient_checkpointing": args.gradient_checkpointing,
@@ -732,6 +748,8 @@ def training_arguments(
             "split_batches": False,
         },
     }
+    if args.save_total_limit is not None:
+        training_kwargs["save_total_limit"] = args.save_total_limit
     if world_size() > 1:
         training_kwargs["ddp_find_unused_parameters"] = False
     return TrainingArguments(**training_kwargs)

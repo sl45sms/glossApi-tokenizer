@@ -104,6 +104,11 @@ DATALOADER_NUM_WORKERS="${DATALOADER_NUM_WORKERS:-4}"
 LOGGING_STEPS="${LOGGING_STEPS:-10}"
 SAVE_STEPS="${SAVE_STEPS:-1000}"
 SAVE_TOTAL_LIMIT="${SAVE_TOTAL_LIMIT:-3}"
+case "$(printf '%s' "${SAVE_TOTAL_LIMIT}" | tr '[:upper:]' '[:lower:]')" in
+	all|none|unlimited|infinite|inf)
+		SAVE_TOTAL_LIMIT="all"
+		;;
+esac
 LR_SCHEDULER_TYPE="${LR_SCHEDULER_TYPE:-cosine}"
 REPORT_TO="${REPORT_TO:-none}"
 BENCHMARK_MODE="${BENCHMARK_MODE:-0}"
@@ -182,6 +187,11 @@ if [[ -n "${PREPARED_TRAIN_DATASET_DIR}" ]]; then
 fi
 if [[ "${BENCHMARK_MODE}" == "1" ]]; then
 	echo "Benchmark mode enabled: checkpoints and final model export will be skipped." >&2
+fi
+if [[ "${SAVE_TOTAL_LIMIT}" == "all" ]]; then
+	echo "Keeping all intermediate checkpoints for each CPT phase." >&2
+else
+	echo "Keeping up to ${SAVE_TOTAL_LIMIT} intermediate checkpoint(s) per CPT phase." >&2
 fi
 echo "Staged workspace into ${STAGE_ROOT}" >&2
 echo "Using MASTER_ADDR=${MASTER_ADDR} MASTER_PORT=${MASTER_PORT}" >&2
