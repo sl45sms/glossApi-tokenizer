@@ -173,7 +173,7 @@ Then rank candidate tokens against the saved Apertus tokenizer:
 ```bash
 ./run_uenv.sh python vocabularyGen/selectTokenizerCandidates.py \
   --min-count 5 \
-  --min-base-token-count 3 \
+  --min-base-token-count 4 \
   --max-selected 5000 \
   --overwrite
 ```
@@ -218,5 +218,5 @@ The script reads the selected token list, skips entries that already exist in th
 - Many modern tokenizers use an internal byte-level representation, so raw vocabulary entries can look like mojibake such as `ÏĦÎ¹ÎºÎ¬`. The comparison script prints decoded token pieces for readability, and `tokenizer_readable.json` applies the same idea to the saved tokenizer export where it is safe to do so.
 - Hugging Face downloads worked without authentication here, but the CLI warns that setting `HF_TOKEN` is recommended for better rate limits.
 - `vocabularyGen/countWords.py` is the unified FineWeb2-HQ Greek preprocessor: it streams through `uenv`, keeps exact counts in SQLite during the run, exports the JSON frequency list, and can optionally emit quoted and capitalized static candidate lists in the same pass.
-- `vocabularyGen/selectTokenizerCandidates.py` turns those counts into a ranked token candidate list using only the base tokenizer, with a configurable minimum base token count that defaults to 3.
-- `scripts/extend_apertus_tokenizer.py` consumes `artifacts/vocab_candidates/selected_tokens_v1.txt` and writes the extended tokenizer under `artifacts/tokenizers/apertus-greek-v1`.
+- `vocabularyGen/selectTokenizerCandidates.py` turns those counts into a ranked token candidate list using only the base tokenizer, with a more conservative aligned-init recipe that now defaults to a minimum base token count of 4.
+- `scripts/extend_apertus_tokenizer.py` consumes `artifacts/vocab_candidates/selected_tokens_v1.txt` and writes the extended tokenizer under `artifacts/tokenizers/apertus-greek-v1`. When `--base-model` is used, it mean-initializes the new input embeddings from the original subtoken decomposition and, by default, zero-initializes untied output-head rows to reduce aligned-init regression. Use `--untied-output-init-strategy mean` only if you explicitly want the older untied-head behavior.
