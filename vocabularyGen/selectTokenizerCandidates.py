@@ -176,7 +176,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-base-token-count-high-frequency",
         type=int,
-        default=4,
+        default=5,
         help=(
             "Minimum base-token count to require once --high-frequency-count-threshold is met. This only "
             "applies to corpus-derived candidates."
@@ -648,6 +648,16 @@ def required_base_token_count_for_candidate(args: argparse.Namespace, count: int
     return required_count
 
 
+def static_required_base_token_count_for_candidate(
+    args: argparse.Namespace,
+    source_files: Sequence[str],
+) -> int:
+    base_required_count = required_base_token_count_for_candidate(args, 0)
+    if "forced.txt" in source_files:
+        return base_required_count
+    return max(base_required_count + 1, args.min_base_token_count_high_frequency)
+
+
 def select_candidates(
     args: argparse.Namespace,
     rows: Sequence[Tuple[str, int]],
@@ -748,22 +758,33 @@ def apply_total_selection_cap(
 
 
 def build_static_candidates(
+    args: argparse.Namespace,
     static_token_groups: Sequence[Dict[str, Any]],
     base_tokenizer,
     existing_tokens: Sequence[str],
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     existing_token_set = set(existing_tokens)
+    default_required_base_token_count = required_base_token_count_for_candidate(args, 0)
+    tightened_required_base_token_count = max(
+        default_required_base_token_count + 1,
+        args.min_base_token_count_high_frequency,
+    )
     stats: Dict[str, Any] = {
         "input_group_count": len(static_token_groups),
+        "default_required_base_token_count": default_required_base_token_count,
+        "tightened_required_base_token_count": tightened_required_base_token_count,
         "exact_single_token_in_base": 0,
         "skipped_exact_single_token_in_base": 0,
         "already_selected_by_token": 0,
+        "forced_bypass_candidate_count": 0,
+        "skipped_below_token_threshold": 0,
         "missing_static_candidates": 0,
     }
     static_candidates: List[Dict[str, Any]] = []
 
     for static_group in static_token_groups:
         word = static_group["word"]
+        source_files = static_group["source_files"]
         exact_single_token, token_ids = has_exact_single_token_coverage(base_tokenizer, word)
         if exact_single_token:
             stats["exact_single_token_in_base"] += 1
@@ -774,6 +795,14 @@ def build_static_candidates(
             stats["already_selected_by_token"] += 1
             continue
 
+        base_token_count = len(token_ids)
+        required_base_token_count = static_required_base_token_count_for_candidate(args, source_files)
+        if "forced.txt" in source_files:
+            stats["forced_bypass_candidate_count"] += 1
+        if base_token_count < required_base_token_count:
+            stats["skipped_below_token_threshold"] += 1
+            continue
+
         static_candidates.append(
             {
                 "word": word,
@@ -782,12 +811,13 @@ def build_static_candidates(
                 "count_sources": "",
                 "source_counts": {},
                 "source_type": "static",
-                "static_source_files": ",".join(static_group["source_files"]),
+                "static_source_files": ",".join(source_files),
                 "source_variant_count": len(static_group["raw_entries"]),
                 "source_variants": static_group["clean_variants"],
                 "static_raw_entries": static_group["raw_entries"],
-                "base_token_count": len(token_ids),
-                "base_fragmentation": max(len(token_ids) - 1, 0),
+                "base_token_count": base_token_count,
+                "base_fragmentation": max(base_token_count - 1, 0),
+                "required_base_token_count": required_base_token_count,
                 "utility_score": 0,
             }
         )
@@ -895,6 +925,7 @@ def main() -> None:
 
     static_token_groups, static_input_stats = load_static_token_groups(args)
     static_candidates, static_stats = build_static_candidates(
+        args,
         static_token_groups,
         base_tokenizer,
         [candidate["token"] for candidate in selected_candidates],
