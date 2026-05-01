@@ -87,7 +87,8 @@ After generating the counts, you can rank real observed words into tokenizer can
 ```bash
 ./run_uenv.sh python vocabularyGen/selectTokenizerCandidates.py \
   --min-count 5 \
-  --min-base-token-count 3 \
+  --min-base-token-count 4 \
+  --min-base-token-count-high-frequency 5 \
   --max-selected 5000 \
   --overwrite
 ```
@@ -98,7 +99,7 @@ That selector writes:
 - `artifacts/vocab_candidates/selected_tokens_v1.txt`
 - `artifacts/reports/fineweb2_hq_ell_grek_candidate_selection.json`
 
-The selector uses only the base Apertus tokenizer. By default it combines the regular word-count database with the quoted-word and capitalized-word SQLite databases when those exist, then ranks the merged catalog by real corpus frequency and base-tokenizer fragmentation. It does not generate artificial stems as tokens.
+The selector uses only the base Apertus tokenizer. By default it combines the regular word-count database with the quoted-word and capitalized-word SQLite databases when those exist, then ranks the merged catalog by real corpus frequency and base-tokenizer fragmentation. Very frequent corpus words are guarded by a stricter minimum-fragmentation threshold so the selector does not retokenize too much common general vocabulary at once. It does not generate artificial stems as tokens.
 Case variants are collapsed by default for corpus-derived counts, so entries like `Δημιουργία` and `δημιουργία` become a single candidate and the lowercase form is preferred when it exists unless you opt into `--preserve-case-variants`.
 Corpus-selected tokens are written to `selected_tokens_v1.txt` with a single leading space so they match normal in-text word boundaries for this tokenizer family.
 The selector also reads curated files in `vocabularyGen/static/` by default. Each non-empty line is treated as a static token candidate, hyphens are removed from the line, and the cleaned static token is appended to `selected_tokens_v1.txt` exactly as written.
@@ -108,8 +109,9 @@ Useful selector options:
 - `--top-k-input 200000` only scores the top 200k counted words.
 - `--skip-quoted-counts` falls back to the regular word-count source plus curated static files only.
 - `--skip-capitalized-counts` excludes the capitalized SQLite counts from the merged catalog while still allowing curated static files.
-- `--min-base-token-count 3` keeps only words that currently split into at least 3 base-tokenizer pieces.
-- `--min-base-token-count 4` is a stricter pass if you want only heavily fragmented words.
+- `--min-base-token-count 4` is the recommended conservative pass for aligned-init experiments.
+- `--high-frequency-count-threshold 250000` keeps the default guard that requires more fragmentation once a corpus word is very common; set it to `0` only if you explicitly want a much more aggressive pass.
+- `--min-base-token-count-high-frequency 5` is the recommended stricter threshold for very frequent corpus words in aligned-init experiments.
 - `--preserve-case-variants` keeps uppercase and lowercase variants as separate candidates if you explicitly want that.
 - `--skip-static-files` disables the extra curated static token injection step.
 - `--max-selected 2000` gives you a smaller, more conservative first token list.
@@ -141,5 +143,5 @@ If you also want a model checkpoint with resized embeddings initialized from the
   --overwrite
 ```
 
-In that mode, the script computes each new token's initialization from the base tokenizer decomposition before the token is added, averages the corresponding input embeddings, and applies the same mean initialization to the LM head when it is not tied to the input embedding matrix.
+In that mode, the script computes each new token's initialization from the base tokenizer decomposition before the token is added and averages the corresponding input embeddings. When the LM head is not tied to the input embedding matrix, the default behavior is now more conservative: untied output rows are zero-initialized to reduce aligned-init regression. If you explicitly want the older untied-head behavior, pass `--untied-output-init-strategy mean`. The `keep-resized` option is also available if you want to leave the resized-model initializer untouched for untied output rows.
 The checkpoint path flags `--model-output-dir`, `--checkpoint-output-dir`, and `--checkpoint-storage-path` are aliases for the same setting. When `SCRATCH` is defined, the default checkpoint location is `$SCRATCH/apertus-greek-init`.
