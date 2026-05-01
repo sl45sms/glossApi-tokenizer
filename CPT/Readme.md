@@ -37,6 +37,7 @@ Useful options:
 - `--model-path`: aligned checkpoint directory
 - `--output-dir`: persistent training output directory
 - `--prepared-train-dataset-dir`: optional directory of packed parquet shards produced offline by `scripts/prepare_cpt_dataset.py`
+- `--save-total-limit`: maximum number of retained intermediate checkpoints per phase; use `all` to disable pruning entirely
 - `--benchmark-mode`: disable checkpoint saves and final export, while still writing phase metrics JSON
 - `--smoke-test`: short validation run
 - `--skip-warmup`: skip the embedding-only phase
@@ -296,6 +297,14 @@ It also sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` by default to re
 On the Clariden `normal` partition, the maximum walltime is `12:00:00`. The tracked Slurm script now uses that as its default, and you can request a shorter walltime with `sbatch --time=...`.
 
 Longer CPT runs are expected to span multiple allocations. Re-submit the same launcher with the same `OUTPUT_DIR` and the training script will automatically resume from the latest checkpoint in `OUTPUT_DIR/warmup/` or `OUTPUT_DIR/full/`. Use `OVERWRITE_OUTPUT_DIR=1` only when you explicitly want to discard the previous phase checkpoints and restart from scratch.
+
+By default, the tracked CPT launchers keep up to `3` intermediate checkpoints per phase through `SAVE_TOTAL_LIMIT=3`. To keep every intermediate checkpoint instead of pruning older `checkpoint-*` directories, submit the job with:
+
+```bash
+export SAVE_TOTAL_LIMIT=all
+```
+
+That works in both `scripts/run_apertus_greek_cpt_clariden.sh` and `scripts/run_apertus_greek_cpt_clariden_multinode.sh`. The final export in `OUTPUT_DIR/final/` is still written separately at the end of a non-benchmark run.
 
 ## Outputs
 
