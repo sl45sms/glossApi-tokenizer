@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Convert a GreekMMLU evaluation JSON report into PNG bar charts for overall, group, level, and subject comparisons."""
 
 import argparse
 import json
@@ -16,9 +17,21 @@ from matplotlib.ticker import PercentFormatter
 DEFAULT_REPORT_JSON = "artifacts/reports/greek_mmlu_eval.json"
 DEFAULT_TOP_SUBJECTS = 20
 BASE_COLOR = "#4e79a7"
+KRIKRI_COLOR = "#f28e2b"
 TRAINED_COLOR = "#e15759"
 POSITIVE_DELTA_COLOR = "#59a14f"
 NEGATIVE_DELTA_COLOR = "#d37295"
+MODEL_ORDER = ("base", "krikri", "trained")
+MODEL_FALLBACK_LABELS = {
+    "base": "Base",
+    "krikri": "KriKri",
+    "trained": "Trained",
+}
+MODEL_COLORS = {
+    "base": BASE_COLOR,
+    "krikri": KRIKRI_COLOR,
+    "trained": TRAINED_COLOR,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,6 +79,7 @@ def load_report(report_path: Path) -> Dict[str, Any]:
     with report_path.open("r", encoding="utf-8") as handle:
         report = json.load(handle)
 
+    available_models = report.get("models", {})
     required_paths = [
         ("models",),
         ("models", "base", "overall"),
@@ -77,6 +91,16 @@ def load_report(report_path: Path) -> Dict[str, Any]:
         ("models", "base", "subject_accuracy"),
         ("models", "trained", "subject_accuracy"),
     ]
+    for model_key in ("krikri",):
+        if model_key in available_models:
+            required_paths.extend(
+                [
+                    ("models", model_key, "overall"),
+                    ("models", model_key, "group_accuracy"),
+                    ("models", model_key, "level_accuracy"),
+                    ("models", model_key, "subject_accuracy"),
+                ]
+            )
     for path in required_paths:
         current: Any = report
         for key in path:
@@ -100,41 +124,61 @@ def model_label(model_ref: str, fallback: str) -> str:
     return Path(cleaned).name or fallback
 
 
-def extract_overall(report: Dict[str, Any]) -> Tuple[List[str], List[float]]:
-    base_overall = report["models"]["base"]["overall"]["accuracy"]
-    trained_overall = report["models"]["trained"]["overall"]["accuracy"]
-    return ["Base", "Trained"], [base_overall, trained_overall]
+def ordered_model_keys(report: Dict[str, Any]) -> List[str]:
+    return [model_key for model_key in MODEL_ORDER if model_key in report["models"]]
+
+
+def extract_overall(
+    report: Dict[str, Any],
+    model_keys: Sequence[str],
+) -> Tuple[List[str], List[float]]:
+    labels = [MODEL_FALLBACK_LABELS[model_key] for model_key in model_keys]
+    values = [float(report["models"][model_key]["overall"]["accuracy"]) for model_key in model_keys]
+    return labels, values
 
 
 def extract_breakdown(
     report: Dict[str, Any],
     breakdown_key: str,
-) -> List[Tuple[str, float, float, float]]:
-    base_breakdown = report["models"]["base"][breakdown_key]
-    trained_breakdown = report["models"]["trained"][breakdown_key]
-    labels = sorted(set(base_breakdown) | set(trained_breakdown))
+) -> List[Tuple[str, Dict[str, float], float]]:
+    model_keys = ordered_model_keys(report)
+    breakdowns = {
+        model_key: report["models"][model_key][breakdown_key]
+        for model_key in model_keys
+    }
+    labels = sorted(
+        {
+            label
+            for breakdown in breakdowns.values()
+            for label in breakdown
+        }
+    )
 
-    rows: List[Tuple[str, float, float, float]] = []
+    rows: List[Tuple[str, Dict[str, float], float]] = []
     for label in labels:
-        base_accuracy = float(base_breakdown.get(label, {}).get("accuracy", 0.0))
-        trained_accuracy = float(trained_breakdown.get(label, {}).get("accuracy", 0.0))
-        rows.append((label, base_accuracy, trained_accuracy, trained_accuracy - base_accuracy))
+        accuracies = {
+            model_key: float(breakdowns[model_key].get(label, {}).get("accuracy", 0.0))
+            for model_key in model_keys
+        }
+        trained_accuracy = accuracies.get("trained", 0.0)
+        base_accuracy = accuracies.get("base", 0.0)
+        rows.append((label, accuracies, trained_accuracy - base_accuracy))
     return rows
 
 
 def order_subject_rows(
-    rows: Sequence[Tuple[str, float, float, float]],
+    rows: Sequence[Tuple[str, Dict[str, float], float]],
     subject_order: str,
     top_subjects: int,
-) -> List[Tuple[str, float, float, float]]:
+) -> List[Tuple[str, Dict[str, float], float]]:
     if subject_order == "alphabetical":
         ordered = sorted(rows, key=lambda row: row[0].lower())
     elif subject_order == "trained":
-        ordered = sorted(rows, key=lambda row: (row[2], row[0].lower()), reverse=True)
+        ordered = sorted(rows, key=lambda row: (row[1].get("trained", 0.0), row[0].lower()), reverse=True)
     elif subject_order == "delta":
-        ordered = sorted(rows, key=lambda row: (row[3], row[0].lower()), reverse=True)
+        ordered = sorted(rows, key=lambda row: (row[2], row[0].lower()), reverse=True)
     else:
-        ordered = sorted(rows, key=lambda row: (abs(row[3]), row[0].lower()), reverse=True)
+        ordered = sorted(rows, key=lambda row: (abs(row[2]), row[0].lower()), reverse=True)
 
     if top_subjects > 0:
         ordered = ordered[:top_subjects]
@@ -161,37 +205,60 @@ def annotate_bars(ax: plt.Axes, bars: Sequence[Any], value_scale: float) -> None
         )
 
 
+def positive_upper_limit(values: Sequence[float], fallback: float = 1.0) -> float:
+    if not values:
+        return fallback
+    return max(fallback, max(values) * 1.15)
+
+
+def symmetric_delta_limit(values: Sequence[float], fallback: float = 1.0) -> float:
+    if not values:
+        return fallback
+    return max(fallback, max(abs(value) for value in values) * 1.2)
+
+
 def save_grouped_accuracy_chart(
-    rows: Sequence[Tuple[str, float, float, float]],
+    rows: Sequence[Tuple[str, Dict[str, float], float]],
     title: str,
     output_path: Path,
-    base_label: str,
-    trained_label: str,
+    model_keys: Sequence[str],
+    model_labels: Dict[str, str],
     dpi: int,
     annotate: bool,
 ) -> None:
     labels = [row[0] for row in rows]
-    base_values = [row[1] * 100.0 for row in rows]
-    trained_values = [row[2] * 100.0 for row in rows]
     positions = list(range(len(labels)))
-    width = 0.38
+    series_count = max(len(model_keys), 1)
+    width = min(0.38, 0.82 / series_count)
 
     fig, ax = plt.subplots(figsize=figure_size(len(labels), wide=True))
-    base_bars = ax.bar([position - width / 2.0 for position in positions], base_values, width=width, color=BASE_COLOR, label=base_label)
-    trained_bars = ax.bar([position + width / 2.0 for position in positions], trained_values, width=width, color=TRAINED_COLOR, label=trained_label)
+    all_values: List[float] = []
+    bar_series: List[Sequence[Any]] = []
+    for series_index, model_key in enumerate(model_keys):
+        offset = (series_index - (series_count - 1) / 2.0) * width
+        model_values = [row[1].get(model_key, 0.0) * 100.0 for row in rows]
+        all_values.extend(model_values)
+        bars = ax.bar(
+            [position + offset for position in positions],
+            model_values,
+            width=width,
+            color=MODEL_COLORS[model_key],
+            label=model_labels[model_key],
+        )
+        bar_series.append(bars)
 
     ax.set_title(title)
     ax.set_ylabel("Accuracy")
     ax.set_xticks(positions)
     ax.set_xticklabels(labels, rotation=35, ha="right")
-    ax.set_ylim(0.0, max(base_values + trained_values) * 1.15 if labels else 100.0)
+    ax.set_ylim(0.0, positive_upper_limit(all_values, fallback=100.0 if not labels else 1.0))
     ax.yaxis.set_major_formatter(PercentFormatter(xmax=100.0))
     ax.grid(axis="y", linestyle="--", alpha=0.3)
     ax.legend()
 
     if annotate:
-        annotate_bars(ax, base_bars, 100.0)
-        annotate_bars(ax, trained_bars, 100.0)
+        for bars in bar_series:
+            annotate_bars(ax, bars, 100.0)
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight")
@@ -199,13 +266,13 @@ def save_grouped_accuracy_chart(
 
 
 def save_delta_chart(
-    rows: Sequence[Tuple[str, float, float, float]],
+    rows: Sequence[Tuple[str, Dict[str, float], float]],
     title: str,
     output_path: Path,
     dpi: int,
 ) -> None:
     labels = [row[0] for row in rows]
-    delta_values = [row[3] * 100.0 for row in rows]
+    delta_values = [row[2] * 100.0 for row in rows]
     colors = [POSITIVE_DELTA_COLOR if value >= 0 else NEGATIVE_DELTA_COLOR for value in delta_values]
     positions = list(range(len(labels)))
 
@@ -217,8 +284,8 @@ def save_delta_chart(
     ax.set_ylabel("Accuracy delta")
     ax.set_xticks(positions)
     ax.set_xticklabels(labels, rotation=35, ha="right")
-    limit = max(abs(value) for value in delta_values) if delta_values else 1.0
-    ax.set_ylim(-limit * 1.2, limit * 1.2)
+    limit = symmetric_delta_limit(delta_values)
+    ax.set_ylim(-limit, limit)
     ax.yaxis.set_major_formatter(PercentFormatter(xmax=100.0))
     ax.grid(axis="y", linestyle="--", alpha=0.3)
 
@@ -242,13 +309,13 @@ def save_delta_chart(
 def save_overall_chart(
     labels: Sequence[str],
     values: Sequence[float],
+    colors: Sequence[str],
     title: str,
     output_path: Path,
     dpi: int,
 ) -> None:
     positions = list(range(len(labels)))
     bar_values = [value * 100.0 for value in values]
-    colors = [BASE_COLOR, TRAINED_COLOR]
 
     fig, ax = plt.subplots(figsize=(7.0, 5.5))
     bars = ax.bar(positions, bar_values, color=colors[: len(labels)], width=0.55)
@@ -257,7 +324,7 @@ def save_overall_chart(
     ax.set_ylabel("Accuracy")
     ax.set_xticks(positions)
     ax.set_xticklabels(labels)
-    ax.set_ylim(0.0, max(bar_values) * 1.15 if bar_values else 100.0)
+    ax.set_ylim(0.0, positive_upper_limit(bar_values, fallback=100.0 if not bar_values else 1.0))
     ax.yaxis.set_major_formatter(PercentFormatter(xmax=100.0))
     ax.grid(axis="y", linestyle="--", alpha=0.3)
     annotate_bars(ax, bars, 100.0)
@@ -274,10 +341,16 @@ def main() -> None:
     output_dir = resolve_output_dir(report_path, args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    base_label = model_label(report["models"]["base"].get("model_ref", "base"), "Base")
-    trained_label = model_label(report["models"]["trained"].get("model_ref", "trained"), "Trained")
+    model_keys = ordered_model_keys(report)
+    model_labels = {
+        model_key: model_label(
+            report["models"][model_key].get("model_ref", model_key),
+            MODEL_FALLBACK_LABELS[model_key],
+        )
+        for model_key in model_keys
+    }
 
-    overall_labels, overall_values = extract_overall(report)
+    overall_labels, overall_values = extract_overall(report, model_keys)
     group_rows = extract_breakdown(report, "group_accuracy")
     level_rows = extract_breakdown(report, "level_accuracy")
     subject_rows = extract_breakdown(report, "subject_accuracy")
@@ -286,6 +359,7 @@ def main() -> None:
     save_overall_chart(
         labels=overall_labels,
         values=overall_values,
+        colors=[MODEL_COLORS[model_key] for model_key in model_keys],
         title="GreekMMLU overall accuracy",
         output_path=output_dir / "overall_accuracy.png",
         dpi=args.dpi,
@@ -294,8 +368,8 @@ def main() -> None:
         rows=group_rows,
         title="GreekMMLU accuracy by group",
         output_path=output_dir / "group_accuracy.png",
-        base_label=base_label,
-        trained_label=trained_label,
+        model_keys=model_keys,
+        model_labels=model_labels,
         dpi=args.dpi,
         annotate=True,
     )
@@ -303,8 +377,8 @@ def main() -> None:
         rows=level_rows,
         title="GreekMMLU accuracy by level",
         output_path=output_dir / "level_accuracy.png",
-        base_label=base_label,
-        trained_label=trained_label,
+        model_keys=model_keys,
+        model_labels=model_labels,
         dpi=args.dpi,
         annotate=True,
     )
@@ -312,8 +386,8 @@ def main() -> None:
         rows=ordered_subject_rows,
         title="GreekMMLU subject accuracy comparison",
         output_path=output_dir / "subject_accuracy_comparison.png",
-        base_label=base_label,
-        trained_label=trained_label,
+        model_keys=model_keys,
+        model_labels=model_labels,
         dpi=args.dpi,
         annotate=False,
     )

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Evaluate the original Apertus base model and a Greek-CPT checkpoint on GreekMMLU, then write a JSON report with overall and category-wise accuracy."""
 
 import argparse
 import gc
@@ -24,11 +25,13 @@ from repo_tokenizer import load_repo_tokenizer
 
 
 DEFAULT_BASE_MODEL = "swiss-ai/Apertus-8B-Instruct-2509"
+DEFAULT_KRIKRI_MODEL = "ilsp/Llama-Krikri-8B-Instruct"
 DEFAULT_TRAINED_MODEL = "/capstor/store/cscs/swissai/a0140/p-skarvelis/apertus-greek-cpt/final"
 DEFAULT_DATASET = "dascim/GreekMMLU"
 DEFAULT_DATASET_CONFIG = "All"
 DEFAULT_OUTPUT_JSON = "artifacts/reports/greek_mmlu_eval.json"
 DEFAULT_BASE_REPORT_CACHE = "artifacts/reports/greek_mmlu_base_eval.json"
+DEFAULT_KRIKRI_REPORT_CACHE = "artifacts/reports/greek_mmlu_krikri_eval.json"
 ANSWER_LABELS = ("Α", "Β", "Γ", "Δ")
 PROMPT_INSTRUCTION = (
 	"Απάντησε στην ακόλουθη ερώτηση πολλαπλής επιλογής δίνοντας μόνο το γράμμα "
@@ -57,6 +60,17 @@ def parse_args() -> argparse.Namespace:
 		"--base-model",
 		default=DEFAULT_BASE_MODEL,
 		help="Model id or local path for the original base model.",
+	)
+	parser.add_argument(
+		"--krikri-model",
+		default=DEFAULT_KRIKRI_MODEL,
+		help="Model id or local path for the Krikri reference model.",
+	)
+	parser.add_argument(
+		"--evaluate-krikri",
+		action=argparse.BooleanOptionalAction,
+		default=True,
+		help="Evaluate the Krikri reference model alongside the base and trained checkpoints.",
 	)
 	parser.add_argument(
 		"--trained-model",
@@ -110,15 +124,31 @@ def parse_args() -> argparse.Namespace:
 		help="Path where the base-model evaluation cache is stored and reused across runs.",
 	)
 	parser.add_argument(
+		"--krikri-report-cache",
+		default=DEFAULT_KRIKRI_REPORT_CACHE,
+		help="Path where the Krikri evaluation cache is stored and reused across runs.",
+	)
+	parser.add_argument(
 		"--use-base-report-cache",
 		action=argparse.BooleanOptionalAction,
 		default=True,
 		help="Reuse a persistent base-model evaluation cache instead of recomputing the base model every run.",
 	)
 	parser.add_argument(
+		"--use-krikri-report-cache",
+		action=argparse.BooleanOptionalAction,
+		default=True,
+		help="Reuse a persistent Krikri evaluation cache instead of recomputing the Krikri model every run.",
+	)
+	parser.add_argument(
 		"--refresh-base-report-cache",
 		action="store_true",
 		help="Ignore any existing cached base evaluation and recompute it before updating the cache.",
+	)
+	parser.add_argument(
+		"--refresh-krikri-report-cache",
+		action="store_true",
+		help="Ignore any existing cached Krikri evaluation and recompute it before updating the cache.",
 	)
 	parser.add_argument(
 		"--device",
@@ -262,6 +292,33 @@ def build_base_cache_key(
 	}
 
 
+def build_krikri_cache_key(
+	args: argparse.Namespace,
+	examples: Sequence[GreekMMLUExample],
+	few_shot_examples: Sequence[GreekMMLUExample],
+) -> Dict[str, Any]:
+	return {
+		"cache_format": 1,
+		"krikri_model": args.krikri_model,
+		"dataset": args.dataset,
+		"dataset_config": args.dataset_config,
+		"split": args.split,
+		"dev_split": args.dev_split,
+		"num_few_shot": args.num_few_shot,
+		"limit": args.limit,
+		"subject_filter": normalize_subject_filter(args.subject),
+		"torch_dtype": args.torch_dtype,
+		"trust_remote_code": args.trust_remote_code,
+		"use_chat_template": args.use_chat_template,
+		"attn_implementation": args.attn_implementation,
+		"save_predictions": args.save_predictions,
+		"prompt_instruction": PROMPT_INSTRUCTION,
+		"answer_labels": list(ANSWER_LABELS),
+		"evaluation_examples_fingerprint": compute_examples_fingerprint(examples),
+		"few_shot_examples_fingerprint": compute_examples_fingerprint(few_shot_examples),
+	}
+
+
 def is_valid_model_report(report: Any) -> bool:
 	return isinstance(report, dict) and all(
 		key in report
@@ -269,7 +326,12 @@ def is_valid_model_report(report: Any) -> bool:
 	)
 
 
-def load_cached_base_report(cache_path: Path, expected_cache_key: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def load_cached_model_report(
+	cache_path: Path,
+	expected_cache_key: Dict[str, Any],
+	cache_label: str,
+	report_key: str,
+) -> Optional[Dict[str, Any]]:
 	if not cache_path.exists():
 		return None
 
@@ -277,39 +339,40 @@ def load_cached_base_report(cache_path: Path, expected_cache_key: Dict[str, Any]
 		payload = json.loads(cache_path.read_text(encoding="utf-8"))
 	except json.JSONDecodeError:
 		print(
-			f"Ignoring unreadable base cache at {cache_path}; recomputing the base model evaluation.",
+			f"Ignoring unreadable {cache_label} cache at {cache_path}; recomputing the {cache_label} evaluation.",
 			file=sys.stderr,
 			flush=True,
 		)
 		return None
 
 	cache_key = payload.get("cache_key")
-	base_report = payload.get("base_report")
+	model_report = payload.get(report_key)
 	if cache_key != expected_cache_key:
 		print(
-			f"Base cache at {cache_path} does not match the current evaluation settings; recomputing.",
+			f"{cache_label.capitalize()} cache at {cache_path} does not match the current evaluation settings; recomputing.",
 			file=sys.stderr,
 			flush=True,
 		)
 		return None
-	if not is_valid_model_report(base_report):
+	if not is_valid_model_report(model_report):
 		print(
-			f"Base cache at {cache_path} is missing the expected report fields; recomputing.",
+			f"{cache_label.capitalize()} cache at {cache_path} is missing the expected report fields; recomputing.",
 			file=sys.stderr,
 			flush=True,
 		)
 		return None
-	return base_report
+	return model_report
 
 
-def save_cached_base_report(
+def save_cached_model_report(
 	cache_path: Path,
 	cache_key: Dict[str, Any],
-	base_report: Dict[str, Any],
+	model_report: Dict[str, Any],
+	report_key: str,
 ) -> None:
 	payload = {
 		"cache_key": cache_key,
-		"base_report": base_report,
+		report_key: model_report,
 	}
 	cache_path.parent.mkdir(parents=True, exist_ok=True)
 	cache_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -631,10 +694,73 @@ def build_report(
 	examples: Sequence[GreekMMLUExample],
 	few_shot_examples: Sequence[GreekMMLUExample],
 	base_report: Dict[str, Any],
+	krikri_report: Optional[Dict[str, Any]],
 	trained_report: Dict[str, Any],
 	base_report_cache_path: Optional[Path],
 	base_report_cache_hit: bool,
+	krikri_report_cache_path: Optional[Path],
+	krikri_report_cache_hit: bool,
 ) -> Dict[str, Any]:
+	models: Dict[str, Dict[str, Any]] = {
+		"base": base_report,
+	}
+	if krikri_report is not None:
+		models["krikri"] = krikri_report
+	models["trained"] = trained_report
+
+	comparison: Dict[str, Any] = {
+		"overall_accuracy_delta": (
+			trained_report["overall"]["accuracy"] - base_report["overall"]["accuracy"]
+		),
+		"group_accuracy_delta": compute_accuracy_delta(
+			base_report["group_accuracy"],
+			trained_report["group_accuracy"],
+		),
+		"subject_accuracy_delta": compute_accuracy_delta(
+			base_report["subject_accuracy"],
+			trained_report["subject_accuracy"],
+		),
+		"level_accuracy_delta": compute_accuracy_delta(
+			base_report["level_accuracy"],
+			trained_report["level_accuracy"],
+		),
+	}
+	if krikri_report is not None:
+		comparison["krikri_vs_base"] = {
+			"overall_accuracy_delta": (
+				krikri_report["overall"]["accuracy"] - base_report["overall"]["accuracy"]
+			),
+			"group_accuracy_delta": compute_accuracy_delta(
+				base_report["group_accuracy"],
+				krikri_report["group_accuracy"],
+			),
+			"subject_accuracy_delta": compute_accuracy_delta(
+				base_report["subject_accuracy"],
+				krikri_report["subject_accuracy"],
+			),
+			"level_accuracy_delta": compute_accuracy_delta(
+				base_report["level_accuracy"],
+				krikri_report["level_accuracy"],
+			),
+		}
+		comparison["trained_vs_krikri"] = {
+			"overall_accuracy_delta": (
+				trained_report["overall"]["accuracy"] - krikri_report["overall"]["accuracy"]
+			),
+			"group_accuracy_delta": compute_accuracy_delta(
+				krikri_report["group_accuracy"],
+				trained_report["group_accuracy"],
+			),
+			"subject_accuracy_delta": compute_accuracy_delta(
+				krikri_report["subject_accuracy"],
+				trained_report["subject_accuracy"],
+			),
+			"level_accuracy_delta": compute_accuracy_delta(
+				krikri_report["level_accuracy"],
+				trained_report["level_accuracy"],
+			),
+		}
+
 	return {
 		"dataset": {
 			"name": args.dataset,
@@ -653,37 +779,25 @@ def build_report(
 			"trust_remote_code": args.trust_remote_code,
 			"attn_implementation": args.attn_implementation,
 		},
-		"models": {
-			"base": base_report,
-			"trained": trained_report,
-		},
+		"models": models,
 		"cache": {
 			"base_report_cache": str(base_report_cache_path) if base_report_cache_path is not None else None,
 			"base_report_cache_hit": base_report_cache_hit,
+			"krikri_report_cache": str(krikri_report_cache_path) if krikri_report_cache_path is not None else None,
+			"krikri_report_cache_hit": krikri_report_cache_hit,
 		},
-		"comparison": {
-			"overall_accuracy_delta": (
-				trained_report["overall"]["accuracy"] - base_report["overall"]["accuracy"]
-			),
-			"group_accuracy_delta": compute_accuracy_delta(
-				base_report["group_accuracy"],
-				trained_report["group_accuracy"],
-			),
-			"subject_accuracy_delta": compute_accuracy_delta(
-				base_report["subject_accuracy"],
-				trained_report["subject_accuracy"],
-			),
-			"level_accuracy_delta": compute_accuracy_delta(
-				base_report["level_accuracy"],
-				trained_report["level_accuracy"],
-			),
-		},
+		"comparison": comparison,
 	}
 
 
 def main() -> None:
 	args = parse_args()
 	base_report_cache_path = Path(args.base_report_cache) if args.use_base_report_cache and args.base_report_cache else None
+	krikri_report_cache_path = (
+		Path(args.krikri_report_cache)
+		if args.evaluate_krikri and args.use_krikri_report_cache and args.krikri_report_cache
+		else None
+	)
 	examples = load_examples(
 		dataset_name=args.dataset,
 		dataset_config=args.dataset_config,
@@ -703,6 +817,7 @@ def main() -> None:
 	)
 	few_shot_index = build_few_shot_index(few_shot_examples)
 	base_cache_key = build_base_cache_key(args, examples, few_shot_examples)
+	krikri_cache_key = build_krikri_cache_key(args, examples, few_shot_examples) if args.evaluate_krikri else None
 
 	print(
 		(
@@ -716,7 +831,12 @@ def main() -> None:
 	base_report_cache_hit = False
 	base_report: Optional[Dict[str, Any]] = None
 	if base_report_cache_path is not None and not args.refresh_base_report_cache:
-		base_report = load_cached_base_report(base_report_cache_path, base_cache_key)
+		base_report = load_cached_model_report(
+			base_report_cache_path,
+			base_cache_key,
+			cache_label="base",
+			report_key="base_report",
+		)
 		if base_report is not None:
 			base_report_cache_hit = True
 			print(
@@ -735,9 +855,53 @@ def main() -> None:
 			args=args,
 		)
 		if base_report_cache_path is not None:
-			save_cached_base_report(base_report_cache_path, base_cache_key, base_report)
+			save_cached_model_report(
+				base_report_cache_path,
+				base_cache_key,
+				base_report,
+				report_key="base_report",
+			)
 			print(
 				f"Saved base evaluation cache to {base_report_cache_path}.",
+				file=sys.stderr,
+				flush=True,
+			)
+
+	krikri_report_cache_hit = False
+	krikri_report: Optional[Dict[str, Any]] = None
+	if args.evaluate_krikri and krikri_report_cache_path is not None and not args.refresh_krikri_report_cache:
+		krikri_report = load_cached_model_report(
+			krikri_report_cache_path,
+			krikri_cache_key,
+			cache_label="krikri",
+			report_key="krikri_report",
+		)
+		if krikri_report is not None:
+			krikri_report_cache_hit = True
+			print(
+				f"Using cached Krikri evaluation from {krikri_report_cache_path}.",
+				file=sys.stderr,
+				flush=True,
+			)
+
+	if args.evaluate_krikri and krikri_report is None:
+		krikri_report = evaluate_model(
+			model_label="krikri",
+			model_ref=args.krikri_model,
+			examples=examples,
+			few_shot_index=few_shot_index,
+			all_few_shot_examples=few_shot_examples,
+			args=args,
+		)
+		if krikri_report_cache_path is not None and krikri_cache_key is not None:
+			save_cached_model_report(
+				krikri_report_cache_path,
+				krikri_cache_key,
+				krikri_report,
+				report_key="krikri_report",
+			)
+			print(
+				f"Saved Krikri evaluation cache to {krikri_report_cache_path}.",
 				file=sys.stderr,
 				flush=True,
 			)
@@ -756,9 +920,12 @@ def main() -> None:
 		examples=examples,
 		few_shot_examples=few_shot_examples,
 		base_report=base_report,
+		krikri_report=krikri_report,
 		trained_report=trained_report,
 		base_report_cache_path=base_report_cache_path,
 		base_report_cache_hit=base_report_cache_hit,
+		krikri_report_cache_path=krikri_report_cache_path,
+		krikri_report_cache_hit=krikri_report_cache_hit,
 	)
 
 	output_path = Path(args.output_json)
@@ -769,7 +936,10 @@ def main() -> None:
 		"output_json": str(output_path),
 		"base_report_cache": str(base_report_cache_path) if base_report_cache_path is not None else None,
 		"base_report_cache_hit": base_report_cache_hit,
+		"krikri_report_cache": str(krikri_report_cache_path) if krikri_report_cache_path is not None else None,
+		"krikri_report_cache_hit": krikri_report_cache_hit,
 		"base_accuracy": base_report["overall"]["accuracy"],
+		"krikri_accuracy": krikri_report["overall"]["accuracy"] if krikri_report is not None else None,
 		"trained_accuracy": trained_report["overall"]["accuracy"],
 		"accuracy_delta": report["comparison"]["overall_accuracy_delta"],
 	}
