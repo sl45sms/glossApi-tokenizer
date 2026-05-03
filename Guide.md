@@ -245,6 +245,8 @@ Run the checkpoint sweep tool on the whole CPT run directory:
   --output-dir artifacts/reports/greek_mmlu_cpt_full_checkpoint_sweep
 ```
 
+The sweep compares the trained checkpoints against Apertus base by default. Add `--evaluate-krikri` only when you also want the Krikri reference lane in every per-checkpoint report.
+
 For continuation runs, pass the continuation run directory instead:
 
 ```bash
