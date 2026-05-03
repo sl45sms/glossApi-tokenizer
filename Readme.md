@@ -103,6 +103,54 @@ Or read one sample per line from [greek_samples.txt](greek_samples.txt) and save
   --report-path artifacts/reports/tokenizer_compare.json
 ```
 
+### 2b. Measure base vs extended token economy on held-out Greek text
+
+The sample comparison above is useful for spot checks. For the actual project goal of making Greek cheaper in tokens, use the held-out token-economy evaluator.
+
+This metric is different from GreekMMLU:
+
+- GreekMMLU is the safety gate for model quality after tokenizer, aligned-init, and CPT changes.
+- Token-economy evaluation is the direct measurement for whether the extended tokenizer spends fewer tokens on Greek text.
+
+Run it on one-sample-per-line held-out Greek text:
+
+```bash
+./run_uenv.sh python tools/evaluateGreekTokenEconomy.py \
+  --sample-file greek_samples.txt \
+  --report-path artifacts/reports/tokenizer_efficiency_eval.json
+```
+
+You can also run it on a JSONL file:
+
+```bash
+./run_uenv.sh python tools/evaluateGreekTokenEconomy.py \
+  --jsonl-file /path/to/heldout_greek.jsonl \
+  --jsonl-text-field text \
+  --limit 2000 \
+  --report-path artifacts/reports/tokenizer_efficiency_eval.json
+```
+
+By default the tool compares:
+
+- `artifacts/tokenizers/apertus-base`
+- `artifacts/tokenizers/apertus-greek-v1`
+- `artifacts/tokenizers/krikri-base`
+
+The report includes:
+
+- total tokens under the base, extended, and optional reference tokenizer
+- weighted chars/token for each tokenizer
+- percentage reduction from base to extended
+- how many held-out samples improved, tied, or regressed
+- top compression wins and worst regressions for manual inspection
+
+A good tokenizer outcome is:
+
+- the extended tokenizer materially reduces token count on held-out Greek text
+- the aligned-init and CPT checkpoints do not regress too hard on GreekMMLU
+
+That separation matters: token economy tells you whether the tokenizer improved Greek compression, while GreekMMLU tells you whether the model still uses the new tokenizer safely.
+
 ### 3. Use a local tokenizer path instead of a Hub id
 
 After extracting the base tokenizer, you can compare the saved local copy directly:
