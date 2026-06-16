@@ -1,3 +1,8 @@
+# what is this?
+Extract words from the Greek `ell_Grek` subset of `epfml/FineWeb2-HQ` and rank them into a candidate tokenizer vocabulary. Then creates tokenizer candidates and extends the base Apertus tokenizer with those candidates. The extended tokenizer can be used to initialize a model checkpoint for continued pretraining (CPT) on Greek data.
+
+
+## The full pipeline is:
 Use `countWords.py` as the unified preprocessor for the Greek `ell_Grek` subset of `epfml/FineWeb2-HQ`.
 It can count regular words, extract words from quoted spans, and collect observed capitalized forms such as sentence-initial words, proper names, countries, months, weekdays, and holidays in a single streaming pass.
 
@@ -82,6 +87,7 @@ By default quoted and capitalized exports both write the top 1000 rows for their
 
 * The SQLite files are intentional. The Greek FineWeb2-HQ split is about 84GB, so keeping exact counts only in memory is not reliable. The script streams the dataset and flushes batched counts to SQLite, then exports the final sorted JSON from that database.
 
+#### Ranking Words into Tokenizer Candidates
 After generating the counts, you can rank real observed words into tokenizer candidates:
 
 ```bash
@@ -118,6 +124,7 @@ Useful selector options:
 
 
 
+#### Extending the Apertus Tokenizer
 To turn the selected token list into a saved tokenizer directory, run:
 
 ```bash
@@ -131,17 +138,17 @@ That writes:
 - `artifacts/tokenizers/apertus-greek-v1/tokenizer_readable.json`
 - `artifacts/reports/tokenizer_apertus_greek_v1.json`
 
-The extension script now uses the token list verbatim. It does not create extra with-space and without-space variants automatically, so the spacing behavior is controlled entirely by what `selectTokenizerCandidates.py` writes.
+The extension script uses the token list verbatim. It does not create extra with-space and without-space variants automatically, so the spacing behavior is controlled entirely by what `selectTokenizerCandidates.py` writes.
 
 If you also want a model checkpoint with resized embeddings initialized from the mean of the original subtoken embeddings, pass a base model path or model id:
 
 ```bash
 ./run_uenv.sh python scripts/extend_apertus_tokenizer.py \
   --base-model swiss-ai/Apertus-8B-Instruct-2509 \
-  --checkpoint-output-dir /iopsstor/scratch/cscs/p-skarvelis/apertus-greek-init \
+  --checkpoint-output-dir /iopsstor/scratch/cscs/p-skarvelis/apertus-greek-tokenizer-v1 \
   --torch-dtype bfloat16 \
   --overwrite
 ```
 
 In that mode, the script computes each new token's initialization from the base tokenizer decomposition before the token is added and averages the corresponding input embeddings. When the LM head is not tied to the input embedding matrix, the default behavior is now more conservative: untied output rows are zero-initialized to reduce aligned-init regression. If you explicitly want the older untied-head behavior, pass `--untied-output-init-strategy mean`. The `keep-resized` option is also available if you want to leave the resized-model initializer untouched for untied output rows.
-The checkpoint path flags `--model-output-dir`, `--checkpoint-output-dir`, and `--checkpoint-storage-path` are aliases for the same setting. When `SCRATCH` is defined, the default checkpoint location is `$SCRATCH/apertus-greek-init`.
+The checkpoint path flags `--model-output-dir`, `--checkpoint-output-dir`, and `--checkpoint-storage-path` are aliases for the same setting. When `SCRATCH` is defined, the default checkpoint location is `$SCRATCH/apertus-greek-tokenizer-v1`.
