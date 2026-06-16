@@ -1,0 +1,28 @@
+# Clariden (GH200 / aarch64) environment definition.
+#
+# You must point this at an aarch64-compatible image (.sqsh) built on Clariden.
+# If you try to run an x86_64 image here, Pyxis/Enroot hooks may fail early
+# (often showing "Failed to refresh the dynamic linker cache").
+
+image = "${SCRATCH}/images/gsdg-qwen3_clariden_flashinfer_latest.sqsh"
+mounts = ["${SCRATCH}:${SCRATCH}"]
+workdir = "${SCRATCH}"
+
+[env]
+HF_HOME = "${SCRATCH}/hf"
+TRANSFORMERS_CACHE = "${SCRATCH}/hf"
+HF_DATASETS_CACHE = "${SCRATCH}/hf_datasets"
+# Optional: only required for gated models/datasets.
+# If unset, Pyxis may fail variable expansion unless we provide a default.
+HF_TOKEN = "${HF_TOKEN:-}"
+
+# Clariden: disable the CXI/libfabric Enroot hook. The hook bind-mounts a host
+# libfabric into the container, which can break torch import for this image due
+# to MPI/libfabric symbol-version mismatch.
+OCI_ANNOTATION_com__hooks__cxi__enabled = "false"
+
+# Clariden-safe defaults for vLLM distributed startup.
+NCCL_SOCKET_IFNAME = "nmn0"
+GLOO_SOCKET_IFNAME = "nmn0"
+VLLM_HOST_IP = "${VLLM_HOST_IP:-}"
+VLLM_ENABLE_V1_MULTIPROCESSING = "0"

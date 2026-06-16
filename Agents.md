@@ -350,7 +350,7 @@ Use `scripts/extend_apertus_tokenizer.py` with `--base-model` to create that ali
 	--base-tokenizer artifacts/tokenizers/apertus-base \
 	--token-file artifacts/vocab_candidates/selected_tokens_v1.txt \
 	--base-model swiss-ai/Apertus-8B-Instruct-2509 \
-	--checkpoint-output-dir "${SCRATCH}/apertus-greek-init" \
+	--checkpoint-output-dir "${SCRATCH}/apertus-greek-tokenizer-v1" \
 	--torch-dtype bfloat16 \
 	--overwrite
 ```
@@ -359,7 +359,7 @@ Notes:
 
 - When `--base-model` is enabled, the script loads the full base LM in order to resize and initialize the new embeddings. Run this step on a machine or job with enough memory.
 - The current default keeps mean initialization for new input embeddings but uses a conservative zero initialization for untied output-head rows. If you explicitly want the older untied-head behavior, pass `--untied-output-init-strategy mean`.
-- If you already have an initialized checkpoint at a persistent path such as `/capstor/store/cscs/swissai/a0140/p-skarvelis/apertus-greek-init`, reuse it and point `CPT/cpt.py` there.
+- If you already have an initialized checkpoint at a persistent path such as `/capstor/store/cscs/swissai/a0140/p-skarvelis/apertus-greek-tokenizer-v1`, reuse it and point `CPT/cpt.py` there.
 - The resulting checkpoint directory is the value that should go into `model_path` in `CPT/cpt.py`.
 
 ## 6. Stage 3: Continue training with the new tokenizer
@@ -474,14 +474,14 @@ artifacts/
 		tokenizer_baseline.md
 		tokenizer_eval_v1.md
 	checkpoints/
-		apertus-greek-init/
+		apertus-greek-tokenizer-v1/
 		apertus-greek-cpt-smoke/
 
 CPT/
 	cpt.py
 
 external persistent storage/
-	${SCRATCH}/apertus-greek-init/
+	${SCRATCH}/apertus-greek-tokenizer-v1/
 	${SCRATCH}/apertus-greek-cpt/
 	or /capstor/store/cscs/swissai/a0140/p-skarvelis/...
 ```
@@ -526,7 +526,7 @@ The practical order for this repository should be:
 
 The first concrete deliverable for the current repo state should be:
 
-1. a persistent `apertus-greek-init` checkpoint aligned with `apertus-greek-v1`
+1. a persistent `apertus-greek-tokenizer-v1` checkpoint aligned with `apertus-greek-v1`
 2. a successful single-node Clariden CPT smoke run from `CPT/cpt.py`
 3. a saved checkpoint that reloads cleanly with the tokenizer
 4. a production-length Clariden CPT run after the smoke path is stable

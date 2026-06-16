@@ -26,7 +26,7 @@ if str(REPO_ROOT) not in sys.path:
 from repo_tokenizer import load_repo_tokenizer
 
 
-DEFAULT_MODEL_PATH = "/capstor/store/cscs/swissai/a0140/p-skarvelis/apertus-greek-init/"
+DEFAULT_MODEL_PATH = "/capstor/store/cscs/swissai/a0140/p-skarvelis/apertus-greek-tokenizer-v1/"
 DEFAULT_OUTPUT_DIR = "/capstor/store/cscs/swissai/a0140/p-skarvelis/apertus-greek-cpt"
 DEFAULT_GREEK_DATASET = "epfml/FineWeb2-HQ"
 DEFAULT_GREEK_CONFIG = "ell_Grek"

@@ -20,7 +20,7 @@ Build or refresh it with:
 	--base-tokenizer artifacts/tokenizers/apertus-base \
 	--token-file artifacts/vocab_candidates/selected_tokens_v1.txt \
 	--base-model swiss-ai/Apertus-8B-Instruct-2509 \
-	--checkpoint-output-dir "${SCRATCH}/apertus-greek-init" \
+	--checkpoint-output-dir "${SCRATCH}/apertus-greek-tokenizer-v1" \
 	--torch-dtype bfloat16 \
 	--overwrite
 ```
@@ -189,7 +189,7 @@ Smoke test example:
 
 ```bash
 export CE_ENVIRONMENT=apertus-greek-clariden
-export MODEL_PATH=${SCRATCH}/apertus-greek-init
+export MODEL_PATH=${SCRATCH}/apertus-greek-tokenizer-v1
 export OUTPUT_DIR=/capstor/scratch/cscs/${USER}/apertus-greek-cpt-smoke
 export PREPARED_TRAIN_DATASET_DIR=/iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-packed-1024
 export SMOKE_TEST=1
@@ -200,7 +200,7 @@ Short benchmark example:
 
 ```bash
 export CE_ENVIRONMENT=apertus-greek-clariden
-export MODEL_PATH=${SCRATCH}/apertus-greek-init
+export MODEL_PATH=${SCRATCH}/apertus-greek-tokenizer-v1
 export OUTPUT_DIR=/capstor/scratch/cscs/${USER}/apertus-greek-cpt-bench
 export PREPARED_TRAIN_DATASET_DIR=/iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-packed-2048
 export BENCHMARK_MODE=1
@@ -214,7 +214,7 @@ Production-length example:
 
 ```bash
 export CE_ENVIRONMENT=apertus-greek-clariden
-export MODEL_PATH=${SCRATCH}/apertus-greek-init
+export MODEL_PATH=${SCRATCH}/apertus-greek-tokenizer-v1
 export OUTPUT_DIR=/capstor/scratch/cscs/${USER}/apertus-greek-cpt
 export PREPARED_TRAIN_DATASET_DIR=/iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-packed-2048
 export SMOKE_TEST=0
@@ -225,7 +225,7 @@ Multi-node production example on 4 Clariden nodes / 16 GPUs:
 
 ```bash
 export CE_ENVIRONMENT=apertus-greek-clariden
-export MODEL_PATH=${SCRATCH}/apertus-greek-init
+export MODEL_PATH=${SCRATCH}/apertus-greek-tokenizer-v1
 export OUTPUT_DIR=/capstor/scratch/cscs/${USER}/apertus-greek-cpt-multinode
 export PREPARED_TRAIN_DATASET_DIR=/iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-packed-2048
 export SMOKE_TEST=0

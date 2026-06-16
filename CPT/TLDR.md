@@ -39,7 +39,7 @@ cp edf/apertus-greek-clariden.toml ~/.edf/apertus-greek-clariden.toml
 ```
 RUN_TAG=$(date +%Y%m%d-%H%M%S)
 export CE_ENVIRONMENT=apertus-greek-clariden
-export MODEL_PATH=${SCRATCH}/apertus-greek-init
+export MODEL_PATH=${SCRATCH}/apertus-greek-tokenizer-v1
 export OUTPUT_DIR=/capstor/scratch/cscs/${USER}/apertus-greek-cpt-bench-${RUN_TAG}
 export PREPARED_TRAIN_DATASET_DIR=/iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-packed-bench-2048
 export ATTN_IMPLEMENTATION=sdpa
@@ -60,7 +60,7 @@ python3 -m json.tool "${OUTPUT_DIR}/full/phase_metrics.json"
 ```
 RUN_TAG=$(date +%Y%m%d-%H%M%S)
 export CE_ENVIRONMENT=apertus-greek-clariden
-export MODEL_PATH=${SCRATCH}/apertus-greek-init
+export MODEL_PATH=${SCRATCH}/apertus-greek-tokenizer-v1
 export OUTPUT_DIR=/capstor/scratch/cscs/${USER}/apertus-greek-cpt-bench-multinode-${RUN_TAG}
 export PREPARED_TRAIN_DATASET_DIR=/iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-packed-bench-2048
 export ATTN_IMPLEMENTATION=sdpa
@@ -89,7 +89,7 @@ The numbers to compare between the 4-GPU and 16-GPU runs are these fields inside
 # production run on 4 nodes
 ```
 export CE_ENVIRONMENT=apertus-greek-clariden
-export MODEL_PATH=/iopsstor/scratch/cscs/${USER}/apertus-greek-init
+export MODEL_PATH=/iopsstor/scratch/cscs/${USER}/apertus-greek-tokenizer-v1
 export OUTPUT_DIR=/capstor/scratch/cscs/${USER}/apertus-greek-cpt-prod-xielu-sdpa-nogc
 export PREPARED_TRAIN_DATASET_DIR=/iopsstor/scratch/cscs/${USER}/prepared-datasets/apertus-greek-packed-bench-2048
 export ATTN_IMPLEMENTATION=sdpa

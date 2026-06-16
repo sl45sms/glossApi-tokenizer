@@ -28,6 +28,18 @@
 
 Το αποτέλεσμα είναι η δημιουργία ενός σταθερού (persistent) aligned αρχικού checkpoint (μοντέλο και εκτεταμένος tokenizer), το οποίο μπει στην αναμονή, έτοιμο για τα μεταγενέστερα εκπαιδευτικά στάδια.
 
+```bash
+./run_uenv.sh python scripts/extend_apertus_tokenizer.py \
+  --token-file artifacts/vocab_candidates/selected_tokens_v1.txt \
+  --base-model swiss-ai/Apertus-8B-Instruct-2509 \
+  --model-output-dir "${SCRATCH}/apertus-greek-tokenizer-v1" \
+  --torch-dtype bfloat16 \
+  --trust-remote-code \
+  --overwrite
+```
+---
+
+
 ## 4. Συνεχής Προ-εκπαίδευση (Continued Pre-Training - CPT)
 
 Μετά τη δημιουργία του αρχικού aligned checkpoint (με το νέο λεξιλόγιο), το μοντέλο χρειάζεται περαιτέρω εκπαίδευση για να αποδώσει νόημα στα νέα tokens και να καλύψει κενά γνώσης. Η διαδικασία αυτή δεν γίνεται τυφλά σε αχανή δεδομένα, αλλά με στοχευμένη μεθοδολογία.

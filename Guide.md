@@ -30,7 +30,7 @@ Use these environment variables consistently:
 export IOPS_ROOT=/iopsstor/scratch/cscs/${USER}
 export CAPSTOR_ROOT=/capstor/scratch/cscs/${USER}
 export BASE_MODEL=swiss-ai/Apertus-8B-Instruct-2509
-export INIT_MODEL=${IOPS_ROOT}/apertus-greek-init
+export INIT_MODEL=${IOPS_ROOT}/apertus-greek-tokenizer-v1
 ```
 
 Use one explicit run name per stage.

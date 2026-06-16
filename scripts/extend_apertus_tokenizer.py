@@ -32,8 +32,8 @@ DEFAULT_READABLE_TOKENIZER_PATH = Path("artifacts/tokenizers/apertus-greek-v1/to
 def default_model_output_dir() -> Path:
     scratch_root = os.environ.get("SCRATCH")
     if scratch_root:
-        return Path(scratch_root) / "apertus-greek-init"
-    return Path("artifacts/checkpoints/apertus-greek-init")
+        return Path(scratch_root) / "apertus-greek-tokenizer-v1"
+    return Path("artifacts/checkpoints/apertus-greek-tokenizer-v1")
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,14 +69,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model-output-dir",
-        "--checkpoint-output-dir",
-        "--checkpoint-storage-path",
         type=Path,
         default=default_model_output_dir(),
         help=(
             "Directory where the resized and mean-initialized model checkpoint will be saved when --base-model "
-            "is provided. Defaults to $SCRATCH/apertus-greek-init when SCRATCH is set, otherwise "
-            "artifacts/checkpoints/apertus-greek-init."
+            "is provided. Defaults to $SCRATCH/apertus-greek-tokenizer-v1 when SCRATCH is set, otherwise "
+            "artifacts/checkpoints/apertus-greek-tokenizer-v1."
         ),
     )
     parser.add_argument(

@@ -39,7 +39,7 @@ fi
 CE_ENVIRONMENT="${CE_ENVIRONMENT:-apertus-greek-clariden}"
 IOPS_SCRATCH_ROOT="${IOPS_SCRATCH_ROOT:-/iopsstor/scratch/cscs/${USER}}"
 CAPSTOR_SCRATCH_ROOT="${CAPSTOR_SCRATCH_ROOT:-/capstor/scratch/cscs/${USER}}"
-MODEL_PATH="${MODEL_PATH:-/capstor/store/cscs/swissai/a0140/p-skarvelis/apertus-greek-init/}"
+MODEL_PATH="${MODEL_PATH:-/capstor/store/cscs/swissai/a0140/p-skarvelis/apertus-greek-tokenizer-v1/}"
 OUTPUT_DIR="${OUTPUT_DIR:-${CAPSTOR_SCRATCH_ROOT}/apertus-greek-cpt}"
 PREPARED_TRAIN_DATASET_DIR="${PREPARED_TRAIN_DATASET_DIR:-}"
 RUN_NAME="${RUN_NAME:-apertus-greek-cpt}"
