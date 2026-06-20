@@ -26,12 +26,14 @@ from repo_tokenizer import load_repo_tokenizer
 
 DEFAULT_BASE_MODEL = "swiss-ai/Apertus-8B-Instruct-2509"
 DEFAULT_KRIKRI_MODEL = "ilsp/Llama-Krikri-8B-Instruct"
+DEFAULT_MAISTROS_MODEL = "IMISLab/Maistros-8B-Instruct"
 DEFAULT_TRAINED_MODEL = "/capstor/store/cscs/swissai/a0140/p-skarvelis/apertus-greek-cpt/final"
 DEFAULT_DATASET = "dascim/GreekMMLU"
 DEFAULT_DATASET_CONFIG = "All"
 DEFAULT_OUTPUT_JSON = "artifacts/reports/greek_mmlu_eval.json"
 DEFAULT_BASE_REPORT_CACHE = "artifacts/reports/greek_mmlu_base_eval.json"
 DEFAULT_KRIKRI_REPORT_CACHE = "artifacts/reports/greek_mmlu_krikri_eval.json"
+DEFAULT_MAISTROS_REPORT_CACHE = "artifacts/reports/greek_mmlu_maistros_eval.json"
 ANSWER_LABELS = ("Α", "Β", "Γ", "Δ")
 PROMPT_INSTRUCTION = (
 	"Απάντησε στην ακόλουθη ερώτηση πολλαπλής επιλογής δίνοντας μόνο το γράμμα "
@@ -71,6 +73,17 @@ def parse_args() -> argparse.Namespace:
 		action=argparse.BooleanOptionalAction,
 		default=True,
 		help="Evaluate the Krikri reference model alongside the base and trained checkpoints.",
+	)
+	parser.add_argument(
+		"--maistros-model",
+		default=DEFAULT_MAISTROS_MODEL,
+		help="Model id or local path for the Maistros reference model.",
+	)
+	parser.add_argument(
+		"--evaluate-maistros",
+		action=argparse.BooleanOptionalAction,
+		default=True,
+		help="Evaluate the Maistros reference model alongside the base and trained checkpoints.",
 	)
 	parser.add_argument(
 		"--trained-model",
@@ -129,6 +142,11 @@ def parse_args() -> argparse.Namespace:
 		help="Path where the Krikri evaluation cache is stored and reused across runs.",
 	)
 	parser.add_argument(
+		"--maistros-report-cache",
+		default=DEFAULT_MAISTROS_REPORT_CACHE,
+		help="Path where the Maistros evaluation cache is stored and reused across runs.",
+	)
+	parser.add_argument(
 		"--use-base-report-cache",
 		action=argparse.BooleanOptionalAction,
 		default=True,
@@ -141,6 +159,12 @@ def parse_args() -> argparse.Namespace:
 		help="Reuse a persistent Krikri evaluation cache instead of recomputing the Krikri model every run.",
 	)
 	parser.add_argument(
+		"--use-maistros-report-cache",
+		action=argparse.BooleanOptionalAction,
+		default=True,
+		help="Reuse a persistent Maistros evaluation cache instead of recomputing the Maistros model every run.",
+	)
+	parser.add_argument(
 		"--refresh-base-report-cache",
 		action="store_true",
 		help="Ignore any existing cached base evaluation and recompute it before updating the cache.",
@@ -149,6 +173,11 @@ def parse_args() -> argparse.Namespace:
 		"--refresh-krikri-report-cache",
 		action="store_true",
 		help="Ignore any existing cached Krikri evaluation and recompute it before updating the cache.",
+	)
+	parser.add_argument(
+		"--refresh-maistros-report-cache",
+		action="store_true",
+		help="Ignore any existing cached Maistros evaluation and recompute it before updating the cache.",
 	)
 	parser.add_argument(
 		"--device",
@@ -300,6 +329,33 @@ def build_krikri_cache_key(
 	return {
 		"cache_format": 1,
 		"krikri_model": args.krikri_model,
+		"dataset": args.dataset,
+		"dataset_config": args.dataset_config,
+		"split": args.split,
+		"dev_split": args.dev_split,
+		"num_few_shot": args.num_few_shot,
+		"limit": args.limit,
+		"subject_filter": normalize_subject_filter(args.subject),
+		"torch_dtype": args.torch_dtype,
+		"trust_remote_code": args.trust_remote_code,
+		"use_chat_template": args.use_chat_template,
+		"attn_implementation": args.attn_implementation,
+		"save_predictions": args.save_predictions,
+		"prompt_instruction": PROMPT_INSTRUCTION,
+		"answer_labels": list(ANSWER_LABELS),
+		"evaluation_examples_fingerprint": compute_examples_fingerprint(examples),
+		"few_shot_examples_fingerprint": compute_examples_fingerprint(few_shot_examples),
+	}
+
+
+def build_maistros_cache_key(
+	args: argparse.Namespace,
+	examples: Sequence[GreekMMLUExample],
+	few_shot_examples: Sequence[GreekMMLUExample],
+) -> Dict[str, Any]:
+	return {
+		"cache_format": 1,
+		"maistros_model": args.maistros_model,
 		"dataset": args.dataset,
 		"dataset_config": args.dataset_config,
 		"split": args.split,
@@ -695,17 +751,22 @@ def build_report(
 	few_shot_examples: Sequence[GreekMMLUExample],
 	base_report: Dict[str, Any],
 	krikri_report: Optional[Dict[str, Any]],
+	maistros_report: Optional[Dict[str, Any]],
 	trained_report: Dict[str, Any],
 	base_report_cache_path: Optional[Path],
 	base_report_cache_hit: bool,
 	krikri_report_cache_path: Optional[Path],
 	krikri_report_cache_hit: bool,
+	maistros_report_cache_path: Optional[Path],
+	maistros_report_cache_hit: bool,
 ) -> Dict[str, Any]:
 	models: Dict[str, Dict[str, Any]] = {
 		"base": base_report,
 	}
 	if krikri_report is not None:
 		models["krikri"] = krikri_report
+	if maistros_report is not None:
+		models["maistros"] = maistros_report
 	models["trained"] = trained_report
 
 	comparison: Dict[str, Any] = {
@@ -760,6 +821,41 @@ def build_report(
 				trained_report["level_accuracy"],
 			),
 		}
+	if maistros_report is not None:
+		comparison["maistros_vs_base"] = {
+			"overall_accuracy_delta": (
+				maistros_report["overall"]["accuracy"] - base_report["overall"]["accuracy"]
+			),
+			"group_accuracy_delta": compute_accuracy_delta(
+				base_report["group_accuracy"],
+				maistros_report["group_accuracy"],
+			),
+			"subject_accuracy_delta": compute_accuracy_delta(
+				base_report["subject_accuracy"],
+				maistros_report["subject_accuracy"],
+			),
+			"level_accuracy_delta": compute_accuracy_delta(
+				base_report["level_accuracy"],
+				maistros_report["level_accuracy"],
+			),
+		}
+		comparison["trained_vs_maistros"] = {
+			"overall_accuracy_delta": (
+				trained_report["overall"]["accuracy"] - maistros_report["overall"]["accuracy"]
+			),
+			"group_accuracy_delta": compute_accuracy_delta(
+				maistros_report["group_accuracy"],
+				trained_report["group_accuracy"],
+			),
+			"subject_accuracy_delta": compute_accuracy_delta(
+				maistros_report["subject_accuracy"],
+				trained_report["subject_accuracy"],
+			),
+			"level_accuracy_delta": compute_accuracy_delta(
+				maistros_report["level_accuracy"],
+				trained_report["level_accuracy"],
+			),
+		}
 
 	return {
 		"dataset": {
@@ -785,6 +881,8 @@ def build_report(
 			"base_report_cache_hit": base_report_cache_hit,
 			"krikri_report_cache": str(krikri_report_cache_path) if krikri_report_cache_path is not None else None,
 			"krikri_report_cache_hit": krikri_report_cache_hit,
+			"maistros_report_cache": str(maistros_report_cache_path) if maistros_report_cache_path is not None else None,
+			"maistros_report_cache_hit": maistros_report_cache_hit,
 		},
 		"comparison": comparison,
 	}
@@ -796,6 +894,11 @@ def main() -> None:
 	krikri_report_cache_path = (
 		Path(args.krikri_report_cache)
 		if args.evaluate_krikri and args.use_krikri_report_cache and args.krikri_report_cache
+		else None
+	)
+	maistros_report_cache_path = (
+		Path(args.maistros_report_cache)
+		if args.evaluate_maistros and args.use_maistros_report_cache and args.maistros_report_cache
 		else None
 	)
 	examples = load_examples(
@@ -818,6 +921,7 @@ def main() -> None:
 	few_shot_index = build_few_shot_index(few_shot_examples)
 	base_cache_key = build_base_cache_key(args, examples, few_shot_examples)
 	krikri_cache_key = build_krikri_cache_key(args, examples, few_shot_examples) if args.evaluate_krikri else None
+	maistros_cache_key = build_maistros_cache_key(args, examples, few_shot_examples) if args.evaluate_maistros else None
 
 	print(
 		(
@@ -906,6 +1010,45 @@ def main() -> None:
 				flush=True,
 			)
 
+	maistros_report_cache_hit = False
+	maistros_report: Optional[Dict[str, Any]] = None
+	if args.evaluate_maistros and maistros_report_cache_path is not None and not args.refresh_maistros_report_cache:
+		maistros_report = load_cached_model_report(
+			maistros_report_cache_path,
+			maistros_cache_key,
+			cache_label="maistros",
+			report_key="maistros_report",
+		)
+		if maistros_report is not None:
+			maistros_report_cache_hit = True
+			print(
+				f"Using cached Maistros evaluation from {maistros_report_cache_path}.",
+				file=sys.stderr,
+				flush=True,
+			)
+
+	if args.evaluate_maistros and maistros_report is None:
+		maistros_report = evaluate_model(
+			model_label="maistros",
+			model_ref=args.maistros_model,
+			examples=examples,
+			few_shot_index=few_shot_index,
+			all_few_shot_examples=few_shot_examples,
+			args=args,
+		)
+		if maistros_report_cache_path is not None and maistros_cache_key is not None:
+			save_cached_model_report(
+				maistros_report_cache_path,
+				maistros_cache_key,
+				maistros_report,
+				report_key="maistros_report",
+			)
+			print(
+				f"Saved Maistros evaluation cache to {maistros_report_cache_path}.",
+				file=sys.stderr,
+				flush=True,
+			)
+
 	trained_report = evaluate_model(
 		model_label="trained",
 		model_ref=args.trained_model,
@@ -921,11 +1064,14 @@ def main() -> None:
 		few_shot_examples=few_shot_examples,
 		base_report=base_report,
 		krikri_report=krikri_report,
+		maistros_report=maistros_report,
 		trained_report=trained_report,
 		base_report_cache_path=base_report_cache_path,
 		base_report_cache_hit=base_report_cache_hit,
 		krikri_report_cache_path=krikri_report_cache_path,
 		krikri_report_cache_hit=krikri_report_cache_hit,
+		maistros_report_cache_path=maistros_report_cache_path,
+		maistros_report_cache_hit=maistros_report_cache_hit,
 	)
 
 	output_path = Path(args.output_json)
@@ -938,8 +1084,11 @@ def main() -> None:
 		"base_report_cache_hit": base_report_cache_hit,
 		"krikri_report_cache": str(krikri_report_cache_path) if krikri_report_cache_path is not None else None,
 		"krikri_report_cache_hit": krikri_report_cache_hit,
+		"maistros_report_cache": str(maistros_report_cache_path) if maistros_report_cache_path is not None else None,
+		"maistros_report_cache_hit": maistros_report_cache_hit,
 		"base_accuracy": base_report["overall"]["accuracy"],
 		"krikri_accuracy": krikri_report["overall"]["accuracy"] if krikri_report is not None else None,
+		"maistros_accuracy": maistros_report["overall"]["accuracy"] if maistros_report is not None else None,
 		"trained_accuracy": trained_report["overall"]["accuracy"],
 		"accuracy_delta": report["comparison"]["overall_accuracy_delta"],
 	}
