@@ -635,6 +635,20 @@ def load_prepared_dataset_splits(args: argparse.Namespace) -> tuple[Dataset, Dat
 
 
 def load_raw_dataset(args: argparse.Namespace) -> Dataset:
+    from datasets import load_from_disk
+
+    dataset_path = Path(args.dataset_name)
+
+    # Handle save_to_disk directories
+    if dataset_path.is_dir() and (dataset_path / "dataset_info.json").exists():
+        rank_zero_print(f"Loading dataset from disk {args.dataset_name!r}.")
+        return load_from_disk(str(dataset_path))
+
+    # Handle local Parquet files (safe for distributed reads)
+    if dataset_path.is_file() and dataset_path.suffix == ".parquet":
+        rank_zero_print(f"Loading Parquet dataset from {args.dataset_name!r}.")
+        return load_dataset("parquet", data_files={"train": str(dataset_path)}, split="train")
+
     dataset_kwargs: Dict[str, Any] = {
         "path": args.dataset_name,
         "split": args.dataset_split,
