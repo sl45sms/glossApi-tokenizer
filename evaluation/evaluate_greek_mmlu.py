@@ -989,15 +989,23 @@ def main() -> None:
 			)
 
 	if args.evaluate_krikri and krikri_report is None:
-		krikri_report = evaluate_model(
-			model_label="krikri",
-			model_ref=args.krikri_model,
-			examples=examples,
-			few_shot_index=few_shot_index,
-			all_few_shot_examples=few_shot_examples,
-			args=args,
-		)
-		if krikri_report_cache_path is not None and krikri_cache_key is not None:
+		try:
+			krikri_report = evaluate_model(
+				model_label="krikri",
+				model_ref=args.krikri_model,
+				examples=examples,
+				few_shot_index=few_shot_index,
+				all_few_shot_examples=few_shot_examples,
+				args=args,
+			)
+		except Exception as exc:
+			print(
+				f"Skipping Krikri evaluation: {exc}",
+				file=sys.stderr,
+				flush=True,
+			)
+			krikri_report = None
+		if krikri_report is not None and krikri_report_cache_path is not None and krikri_cache_key is not None:
 			save_cached_model_report(
 				krikri_report_cache_path,
 				krikri_cache_key,
@@ -1028,15 +1036,23 @@ def main() -> None:
 			)
 
 	if args.evaluate_maistros and maistros_report is None:
-		maistros_report = evaluate_model(
-			model_label="maistros",
-			model_ref=args.maistros_model,
-			examples=examples,
-			few_shot_index=few_shot_index,
-			all_few_shot_examples=few_shot_examples,
-			args=args,
-		)
-		if maistros_report_cache_path is not None and maistros_cache_key is not None:
+		try:
+			maistros_report = evaluate_model(
+				model_label="maistros",
+				model_ref=args.maistros_model,
+				examples=examples,
+				few_shot_index=few_shot_index,
+				all_few_shot_examples=few_shot_examples,
+				args=args,
+			)
+		except Exception as exc:
+			print(
+				f"Skipping Maistros evaluation: {exc}",
+				file=sys.stderr,
+				flush=True,
+			)
+			maistros_report = None
+		if maistros_report is not None and maistros_report_cache_path is not None and maistros_cache_key is not None:
 			save_cached_model_report(
 				maistros_report_cache_path,
 				maistros_cache_key,
