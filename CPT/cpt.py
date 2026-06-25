@@ -521,9 +521,18 @@ def build_training_dataset(args: argparse.Namespace, tokenizer):
     if len(datasets) == 1:
         combined_ds = datasets[0]
     else:
+        # Normalize sampling probabilities so they sum to 1.
+        # interleave_datasets requires probabilities that sum to 1;
+        # without normalisation a user who overrides only one of
+        # --greek-probability / --english-probability would hit
+        # "ValueError: Probabilities do not sum to 1".
+        prob_sum = sum(probabilities)
+        if prob_sum <= 0:
+            raise SystemExit("Dataset sampling probabilities sum to zero or less.")
+        normalized = [p / prob_sum for p in probabilities]
         combined_ds = interleave_datasets(
             datasets,
-            probabilities=probabilities,
+            probabilities=normalized,
             stopping_strategy=args.stopping_strategy,
         )
 
