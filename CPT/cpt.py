@@ -101,8 +101,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--attn-implementation",
+        choices=("sdpa", "flash_attention_2", "eager"),
         default="sdpa",
-        help="Attention backend passed to model loading, e.g. sdpa, flash_attention_2, or eager.",
+        help="Attention backend passed to model loading. Defaults to sdpa.",
     )
     parser.add_argument(
         "--gradient-checkpointing",
@@ -521,11 +522,6 @@ def build_training_dataset(args: argparse.Namespace, tokenizer):
     if len(datasets) == 1:
         combined_ds = datasets[0]
     else:
-        # Normalize sampling probabilities so they sum to 1.
-        # interleave_datasets requires probabilities that sum to 1;
-        # without normalisation a user who overrides only one of
-        # --greek-probability / --english-probability would hit
-        # "ValueError: Probabilities do not sum to 1".
         prob_sum = sum(probabilities)
         if prob_sum <= 0:
             raise SystemExit("Dataset sampling probabilities sum to zero or less.")
@@ -552,11 +548,17 @@ def build_training_dataset(args: argparse.Namespace, tokenizer):
     return filtered_ds.map(**map_kwargs)
 
 
-def causal_lm_data_collator(features: Sequence[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+def causal_lm_data_collator(features: Sequence[Dict[str, Any]], tokenizer=None) -> Dict[str, torch.Tensor]:
     input_ids = torch.tensor([feature["input_ids"] for feature in features], dtype=torch.long)
+    labels = input_ids.clone()
+    
+    # Ignore pad tokens in loss computation by masking them with -100
+    if tokenizer is not None and tokenizer.pad_token_id is not None:
+        labels[labels == tokenizer.pad_token_id] = -100
+
     batch = {
         "input_ids": input_ids,
-        "labels": input_ids.clone(),
+        "labels": labels,
     }
 
     if "attention_mask" in features[0]:
@@ -839,7 +841,7 @@ def run_phase(
             warmup_steps=warmup_steps,
         ),
         train_dataset=train_dataset,
-        data_collator=causal_lm_data_collator,
+        data_collator=partial(causal_lm_data_collator, tokenizer=tokenizer),
     )
 
     resume_checkpoint = None
