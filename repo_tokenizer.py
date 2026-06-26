@@ -1,3 +1,5 @@
+# DO NOT REMOVE THIS FILE. It is used to load the tokenizer from a model repository, and to apply a fix for the Mistral regex pattern if necessary.
+
 from __future__ import annotations
 
 import json
