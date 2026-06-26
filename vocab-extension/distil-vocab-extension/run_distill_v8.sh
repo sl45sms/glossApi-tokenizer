@@ -3,22 +3,22 @@
 #SBATCH --job-name=token-distill-v8
 #SBATCH --partition=normal
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=1
-#SBATCH --cpus-per-task=8
+#SBATCH --gpus-per-node=4
+#SBATCH --cpus-per-task=32
 #SBATCH --time=12:00:00
 
 PROJECT_DIR="/users/p-skarvelis/glossApi-Tokenizer"
 cd "${PROJECT_DIR}"
 
 echo "========================================="
-echo " Token Distillation v8 (single-GPU) — $(date)"
-echo " Approach: Pre-compute + stochastic + multi-layer"
-echo " GPU: 1, Samples: 5000, Steps: 5000, Batch: 64"
+echo " Token Distillation v8 (multi-GPU) — $(date)"
+echo " Approach: Pre-compute + stochastic + multi-layer (parallel)"
+echo " GPU: 4, Samples: 5000, Steps: 5000, Batch: 64"
 echo " Layers: [4,8,16] weights=[0.2,0.5,0.3]"
 echo " Resume: YES (every 50 steps)"
 echo "========================================="
 
-./run_uenv.sh python -u scripts/advanced_token_init.py \
+./run_uenv.sh python -u ${PROJECT_DIR}/vocab-extension/distil-vocab-extension/advanced_token_init.py \
   --token-file ${PROJECT_DIR}/artifacts/vocab_candidates/selected_tokens_v1.txt \
   --base-model swiss-ai/Apertus-8B-Instruct-2509 \
   --extended-tokenizer ${PROJECT_DIR}/artifacts/tokenizers/apertus-greek-v1 \

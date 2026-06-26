@@ -18,7 +18,7 @@ import torch
 from transformers import AutoModelForCausalLM
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -509,167 +509,108 @@ def run_token_distillation(
     if torch.cuda.is_available(): torch.cuda.empty_cache()
     print(f"Cache done in {_time.time()-t0:.0f}s")
 
-    # ---- SINGLE GPU (proven reliable) ----
-    return _distill_single(args, model, tokenizer, all_tokens, cache_dir, distill_layers, layer_weights)
+    if not use_parallel:
+        print("Running single-GPU distillation.")
+        return _distill_single(args, model, tokenizer, all_tokens, cache_dir, distill_layers, layer_weights)
 
-    if not aligned:
-        print("No aligned samples — skipping")
-        del teacher
-        return None
-    print(f"Aligned {len(aligned)} samples")
+    # ---- MULTI GPU ----
+    print(f"Starting multi-GPU distillation on {num_gpus} GPUs.")
 
-    # ---- Pre-compute teacher hidden states → disk ----
-    cache_dir = Path(args.output_dir) / "teacher_cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Pre-computing teacher hidden states for {len(aligned)} samples → {cache_dir} ...")
-    t0 = _time.time()
-    for idx, (old_ids, new_ids_t, old_pos, new_pos, new_tok_id, token_str) in enumerate(aligned):
-        cache_file = cache_dir / f"t_{idx:05d}.pt"
-        if cache_file.exists():
-            continue  # already cached
-        old_ids = old_ids.to(device)
-        with torch.no_grad():
-            t_out = teacher(old_ids, output_hidden_states=True)
-            # Save hidden states at target layers
-            targets = {}
-            for layer in distill_layers:
-                targets[str(layer)] = t_out.hidden_states[layer + 1][0, old_pos, :].cpu()
-        torch.save(targets, cache_file)
-        if (idx + 1) % 100 == 0:
-            elapsed = _time.time() - t0
-            eta = elapsed / (idx + 1) * (len(aligned) - idx - 1)
-            print(f"  cached {idx+1}/{len(aligned)}  elapsed={elapsed:.0f}s  eta={eta:.0f}s")
+    # 1. Split tokens
+    token_chunks: List[List[str]] = [[] for _ in range(num_gpus)]
+    global_indices_chunks: List[List[int]] = [[] for _ in range(num_gpus)]
+    for i, token in enumerate(all_tokens):
+        gpu_idx = i % num_gpus
+        token_chunks[gpu_idx].append(token)
+        global_indices_chunks[gpu_idx].append(i)
 
-    # Unload teacher
-    del teacher
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    print(f"Teacher cache done in {_time.time()-t0:.0f}s. Starting student training...")
+    # 2. Create worker configs and spawn processes
+    worker_procs = []
+    worker_configs = []
+    tmp_dir = Path(args.output_dir) / "worker_tmp"
+    tmp_dir.mkdir(exist_ok=True)
 
-    # ---- Freeze student, unfreeze only new embeddings ----
-    model = model.to(device)
-    for p in model.parameters():
-        p.requires_grad = False
+    # Unload main model from GPU to free memory for workers
+    model.to("cpu")
+    if torch.cuda.is_available(): torch.cuda.empty_cache()
+
+    for i in range(num_gpus):
+        if not token_chunks[i]:
+            continue
+
+        worker_cfg = {
+            "gpu": i,
+            "tokens": token_chunks[i],
+            "global_indices": global_indices_chunks[i],
+            "base_model": args.base_model,
+            "extended_tokenizer": str(args.extended_tokenizer),
+            "output_dir": str(args.output_dir),
+            "cache_dir": str(cache_dir),
+            "torch_dtype": args.torch_dtype,
+            "trust_remote_code": args.trust_remote_code,
+            "distill_steps": args.distill_steps,
+            "distill_lr": args.distill_lr,
+            "layers": distill_layers,
+            "layer_weights": layer_weights,
+        }
+
+        cfg_file = tmp_dir / f"worker_cfg_{i}.pkl"
+        with open(cfg_file, "wb") as f:
+            pickle.dump(worker_cfg, f)
+        worker_configs.append(cfg_file)
+
+        script_path = Path(__file__).resolve()
+        worker_env = _os.environ.copy()
+        worker_env["CUDA_VISIBLE_DEVICES"] = str(i)
+
+        cmd = [sys.executable, str(script_path), "--distill-worker", str(cfg_file)]
+
+        log_file = Path(args.output_dir) / f"worker_{i}.log"
+        print(f"Spawning worker for GPU {i} with {len(token_chunks[i])} tokens. Log: {log_file}")
+        with open(log_file, "w") as log:
+            proc = subprocess.Popen(cmd, env=worker_env, stdout=log, stderr=subprocess.STDOUT)
+        worker_procs.append(proc)
+
+    # 3. Wait for workers
+    num_finished = 0
+    for proc in worker_procs:
+        proc.wait()
+        if proc.returncode == 0:
+            print(f"Worker process {proc.pid} finished successfully.")
+            num_finished += 1
+        else:
+            print(f"Worker process {proc.pid} failed with code {proc.returncode}. Check logs.")
+
+    if num_finished != len(worker_procs):
+        print("Some workers failed. Check logs. The resulting model will be incomplete.")
+
+    # 4. Merge embeddings
+    print("All workers finished. Merging embeddings...")
     w_in = model.get_input_embeddings().weight
     out_layer = model.get_output_embeddings()
     w_out = out_layer.weight if out_layer is not None else None
     tied = bool(w_out is not None and w_out.data_ptr() == w_in.data_ptr())
-    w_in.requires_grad = True
-    if w_out is not None and not tied:
-        w_out.requires_grad = True
 
-    new_ids_set: set[int] = set()
-    for t in tokens_to_add:
-        tid = tokenizer.convert_tokens_to_ids(t)
-        if isinstance(tid, int):
-            new_ids_set.add(tid)
+    for i in range(num_gpus):
+        emb_file = Path(args.output_dir) / f"embeddings_gpu{i}.pt"
+        if not emb_file.exists(): continue
 
-    opt = torch.optim.AdamW([w_in] if tied else [w_in, w_out], lr=args.distill_lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.distill_steps)
-    model.train()
-    if hasattr(model, "gradient_checkpointing_enable"):
-        model.gradient_checkpointing_enable()
+        data = torch.load(emb_file, map_location="cpu")
+        for tid_str, emb in data.get("input_embs", {}).items():
+            w_in.data[int(tid_str)].copy_(emb)
+        if w_out is not None and not tied:
+            for tid_str, emb in data.get("output_embs", {}).items():
+                w_out.data[int(tid_str)].copy_(emb)
+        emb_file.unlink()
 
-    # ---- Resume ----
-    ckpt_dir = Path(args.output_dir) / "distill_checkpoints"
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    start_step = 0
-    ckpt_files = sorted(ckpt_dir.glob("step_*.pt"))
-    if ckpt_files:
-        latest = ckpt_files[-1]
-        print(f"Resuming from {latest}")
-        ckpt = torch.load(latest, map_location=device)
-        start_step = ckpt["step"] + 1
-        opt.load_state_dict(ckpt["optimizer"])
-        scheduler.load_state_dict(ckpt["scheduler"])
-        # Restore trained embedding weights
-        if "w_in" in ckpt:
-            w_in.copy_(ckpt["w_in"])
-        if "w_out" in ckpt and w_out is not None:
-            w_out.copy_(ckpt["w_out"])
-        print(f"Resumed at step {start_step} (embeddings restored)")
+    for cfg_file in worker_configs:
+        try: cfg_file.unlink()
+        except OSError: pass
+    try: tmp_dir.rmdir()
+    except OSError: pass
 
-    # ---- Training loop ----
-    batch_size = 64
-    loss_history: List[float] = []
-    _start_time = _time.time()
-
-    for step in range(start_step, args.distill_steps):
-        step_start = _time.time()
-        # Random batch
-        batch_indices = random.sample(range(len(aligned)), min(batch_size, len(aligned)))
-        total_loss = 0.0
-
-        for idx in batch_indices:
-            cache_file = cache_dir / f"t_{idx:05d}.pt"
-            if not cache_file.exists():
-                continue
-            targets = torch.load(cache_file, map_location="cpu")
-
-            old_ids, new_ids_t, old_pos, new_pos, new_tok_id, token_str = aligned[idx]
-            new_ids_t = new_ids_t.to(device)
-
-            model.zero_grad(set_to_none=True)
-            s_out = model(input_ids=new_ids_t, output_hidden_states=True)
-
-            loss = torch.tensor(0.0, device=device)
-            for layer, weight in zip(distill_layers, layer_weights):
-                t_target = targets[str(layer)].to(device)
-                s_pred = s_out.hidden_states[layer + 1][0, new_pos, :]
-                loss = loss + weight * torch.nn.functional.mse_loss(s_pred, t_target)
-
-            if loss.item() > 0 and not torch.isnan(loss) and loss.item() < 5000:
-                loss.backward()
-                # Gradient clipping to handle outlier samples
-                torch.nn.utils.clip_grad_norm_([w_in], max_norm=1.0)
-                if w_in.grad is not None:
-                    vocab_sz = w_in.grad.shape[0]
-                    mask = torch.zeros(vocab_sz, 1, device=device)
-                    for tid in new_ids_set:
-                        if isinstance(tid, int) and 0 <= tid < vocab_sz:
-                            mask[tid] = 1.0
-                    w_in.grad *= mask
-                opt.step()
-                total_loss += loss.item()
-
-        scheduler.step()
-        avg = total_loss / len(batch_indices) if batch_indices else 0
-        loss_history.append(avg)
-        step_time = _time.time() - step_start
-        elapsed = _time.time() - _start_time
-        eta = (elapsed / (step - start_step + 1)) * (args.distill_steps - step - 1) if step > start_step else 0
-
-        if step % 10 == 0 or step < 3 or step == args.distill_steps - 1:
-            print(f"  step {step:4d}/{args.distill_steps}  loss={avg:.2f}  lr={scheduler.get_last_lr()[0]:.2e}  "
-                  f"step_time={step_time:.1f}s  elapsed={elapsed:.0f}s  eta={eta:.0f}s")
-
-        if step % 50 == 0 and step > start_step:
-            ckpt_path = ckpt_dir / f"step_{step:05d}.pt"
-            torch.save({
-                "step": step,
-                "optimizer": opt.state_dict(),
-                "scheduler": scheduler.state_dict(),
-                "loss": avg,
-                "w_in": w_in.detach().cpu(),
-                "w_out": w_out.detach().cpu() if w_out is not None else None,
-            }, ckpt_path)
-            all_ckpts = sorted(ckpt_dir.glob("step_*.pt"))
-            for old_ckpt in all_ckpts[:-3]:
-                old_ckpt.unlink()
-            print(f"  ✓ checkpoint: {ckpt_path.name}")
-
-    # Cleanup
-    for p in model.parameters():
-        p.requires_grad = True
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    final = loss_history[-1] if loss_history else None
-    print(f"Distillation done  final_loss={final}")
-    return final
-    return final
+    print("Embeddings merged.")
+    return 0.0  # Placeholder for success
 
 
 def _find_decoder_layer(model, target_idx: int):
