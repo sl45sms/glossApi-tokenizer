@@ -1,3 +1,5 @@
+WIP
+
 bash that run in the loop to start QWEN as agent to monitor the training.
 
 look at `nohup` and `&` to run the command in the background.
