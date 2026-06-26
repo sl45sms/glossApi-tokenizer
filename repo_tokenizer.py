@@ -112,6 +112,9 @@ def maybe_fix_mistral_regex(tokenizer, model_ref: str):
         return tokenizer
 
     model_type = _model_type_for(model_ref)
+    # This is a heuristic: the base Apertus/Mistral tokenizers have >100k tokens.
+    # This avoids applying the regex fix to other, smaller tokenizers that might
+    # be loaded for other purposes (e.g. evaluation against other models).
     if vocab_size <= 100000:
         return tokenizer
     if model_type is not None and model_type not in _MISTRAL_LIKE_MODEL_TYPES:
