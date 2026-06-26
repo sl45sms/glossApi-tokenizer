@@ -1,5 +1,5 @@
 # what is this?
-Extract words from the Greek `ell_Grek` subset of `epfml/FineWeb2-HQ` and rank them into a candidate tokenizer vocabulary. Then creates tokenizer candidates and extends the base Apertus tokenizer with those candidates. The extended tokenizer can be used to initialize a model checkpoint for continued pretraining (CPT) on Greek data.
+Extract words from the Greek `ell_Grek` subset of `epfml/FineWeb2-HQ` and rank them into a candidate tokenizer vocabulary. Then creates tokenizer candidates and extends the base Apertus tokenizer with those candidates. The extended tokenizer can be used to initialize a model checkpoint for continued pretraining (CPT) on Greek data using one of three methods: mean-init, CGA, or distillation. The extended tokenizer can also be used for inference with the original Apertus checkpoint.
 
 
 ## The full pipeline is:
@@ -10,14 +10,14 @@ It can count regular words, extract words from quoted spans, and collect observe
 Run it through `uenv` like the other repo scripts:
 
 ```bash
-./run_uenv.sh python vocabularyGen/countWords.py \
+./run_uenv.sh python vocab-extension/vocabularyGen/countWords.py \
   --report-every 10000
 ```
 
 To generate the full tokenizer-mining bundle in one pass, including quoted words and capitalized words, run:
 
 ```bash
-./run_uenv.sh python vocabularyGen/countWords.py \
+./run_uenv.sh python vocab-extension/vocabularyGen/countWords.py \
   --count-modes words quoted capitalized \
   --report-every 10000 \
   --overwrite
@@ -68,7 +68,7 @@ The generated quoted/capitalized text exports are inspection artifacts, not cura
 If you only want quoted-word extraction, run the unified script directly in quoted-only mode:
 
 ```bash
-./run_uenv.sh python vocabularyGen/countWords.py \
+./run_uenv.sh python vocab-extension/vocabularyGen/countWords.py \
   --count-modes quoted \
   --overwrite
 ```
@@ -91,7 +91,7 @@ By default quoted and capitalized exports both write the top 1000 rows for their
 After generating the counts, you can rank real observed words into tokenizer candidates:
 
 ```bash
-./run_uenv.sh python vocabularyGen/selectTokenizerCandidates.py \
+./run_uenv.sh python vocab-extension/vocabularyGen/selectTokenizerCandidates.py \
   --min-count 5 \
   --min-base-token-count 4 \
   --min-base-token-count-high-frequency 5 \
@@ -123,32 +123,3 @@ Useful selector options:
 - `--max-selected 2000` gives you a smaller, more conservative first token list.
 
 
-
-#### Extending the Apertus Tokenizer
-To turn the selected token list into a saved tokenizer directory, run:
-
-```bash
-./run_uenv.sh python scripts/extend_apertus_tokenizer.py \
-  --overwrite
-```
-
-That writes:
-
-- `artifacts/tokenizers/apertus-greek-v1`
-- `artifacts/tokenizers/apertus-greek-v1/tokenizer_readable.json`
-- `artifacts/reports/tokenizer_apertus_greek_v1.json`
-
-The extension script uses the token list verbatim. It does not create extra with-space and without-space variants automatically, so the spacing behavior is controlled entirely by what `selectTokenizerCandidates.py` writes.
-
-If you also want a model checkpoint with resized embeddings initialized from the mean of the original subtoken embeddings, pass a base model path or model id:
-
-```bash
-./run_uenv.sh python scripts/extend_apertus_tokenizer.py \
-  --base-model swiss-ai/Apertus-8B-Instruct-2509 \
-  --checkpoint-output-dir /iopsstor/scratch/cscs/p-skarvelis/apertus-greek-tokenizer-v1 \
-  --torch-dtype bfloat16 \
-  --overwrite
-```
-
-In that mode, the script computes each new token's initialization from the base tokenizer decomposition before the token is added and averages the corresponding input embeddings. When the LM head is not tied to the input embedding matrix, the default behavior is now more conservative: untied output rows are zero-initialized to reduce aligned-init regression. If you explicitly want the older untied-head behavior, pass `--untied-output-init-strategy mean`. The `keep-resized` option is also available if you want to leave the resized-model initializer untouched for untied output rows.
-The checkpoint path flags `--model-output-dir`, `--checkpoint-output-dir`, and `--checkpoint-storage-path` are aliases for the same setting. When `SCRATCH` is defined, the default checkpoint location is `$SCRATCH/apertus-greek-tokenizer-v1`.

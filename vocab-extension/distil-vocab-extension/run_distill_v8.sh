@@ -7,7 +7,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --time=12:00:00
 
-cd /users/p-skarvelis/glossApi-Tokenizer
+PROJECT_DIR="/users/p-skarvelis/glossApi-Tokenizer"
+cd "${PROJECT_DIR}"
 
 echo "========================================="
 echo " Token Distillation v8 (single-GPU) — $(date)"
@@ -18,9 +19,9 @@ echo " Resume: YES (every 50 steps)"
 echo "========================================="
 
 ./run_uenv.sh python -u scripts/advanced_token_init.py \
-  --token-file artifacts/vocab_candidates/selected_tokens_v1.txt \
+  --token-file ${PROJECT_DIR}/artifacts/vocab_candidates/selected_tokens_v1.txt \
   --base-model swiss-ai/Apertus-8B-Instruct-2509 \
-  --extended-tokenizer artifacts/tokenizers/apertus-greek-v1 \
+  --extended-tokenizer ${PROJECT_DIR}/artifacts/tokenizers/apertus-greek-v1 \
   --output-dir "${SCRATCH}/apertus-greek-tokenizer-distill" \
   --init-strategy retok-distill \
   --torch-dtype bfloat16 \

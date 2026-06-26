@@ -1,3 +1,8 @@
+# 
+#   This script counts words in the FineWeb2-HQ Greek dataset on Clariden 
+#   and exports the results to JSON and SQLite. 
+#   It can also extract quoted and capitalized words for tokenizer static candidates. 
+#
 import argparse
 import json
 import os

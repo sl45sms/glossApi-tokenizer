@@ -137,7 +137,6 @@ class FastTextSubwordModel:
 
     def __init__(self):
         self._model = None
-        self.dim: int = 0
 
     def load_bin(self, path: Path) -> None:
         """Load a fastText .bin model (includes subword information)."""
@@ -150,20 +149,7 @@ class FastTextSubwordModel:
             )
         self._model = fasttext.load_model(str(path))
         self.dim = self._model.get_dimension()
-        # Cache the vocabulary as a set for fast membership checks
-        self._word_set = frozenset(self._model.words)
         logger.info("Loaded fastText subword model from %s (dim=%d)", path, self.dim)
-
-    @property
-    def words(self) -> List[str]:
-        """Return the list of known words in the model's vocabulary."""
-        if self._model is None:
-            return []
-        return self._model.words
-
-    def get_words(self) -> List[str]:
-        """Return the list of known words (for API compatibility with extract_anchor_tokens)."""
-        return self.words
 
     def get_vector(self, word: str) -> np.ndarray:
         """Get the vector for any word using subword composition."""
@@ -172,15 +158,8 @@ class FastTextSubwordModel:
         return np.array(self._model.get_word_vector(word), dtype=np.float32)
 
     def __contains__(self, word: str) -> bool:
-        """Check if a word is in the model's vocabulary (not just producible via subwords)."""
-        if self._model is None:
-            return False
-        return word in self._word_set
-
-    def __len__(self) -> int:
-        if self._model is None:
-            return 0
-        return len(self._model.words)
+        # Subword models can produce vectors for any string
+        return True
 
 
 # ── Download helpers ───────────────────────────────────────────────────
@@ -294,7 +273,7 @@ def extract_anchor_tokens(
     if hasattr(ft_model, 'words'):
         ft_words = ft_model.words
     elif hasattr(ft_model, 'word_to_vec'):
-        ft_words = list(ft_model.word_to_vec.keys())
+        ft_words = ft_model.word_to_vec.keys()
     else:
         ft_words = list(ft_model.get_words())
 

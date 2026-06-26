@@ -1,0 +1,1 @@
+rm -rf "${SCRATCH}/apertus-greek-tokenizer-distill" && sbatch ./run_distill_v8.sh
