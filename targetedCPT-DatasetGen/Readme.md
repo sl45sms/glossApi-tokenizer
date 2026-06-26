@@ -46,7 +46,7 @@ Useful options:
 - `--max-output-bytes 104857600` stops around a 100MB targeted dataset.
 - `--max-output-bytes 1073741824` stops around a 1GB curated dataset.
 - `--max-documents 200000` does a shorter dry run.
-- `--quality-score-min 4.0` ignores lower-quality FineWeb rows.
+- `--quality-score-min 0.7` ignores lower-quality FineWeb-HQ rows.
 - `--report-every 10000` prints progress every 10k scanned documents.
 
 Examples:
@@ -69,7 +69,7 @@ Examples:
 	--output-path ${SCRATCH}/targeted-cpt/curated_greek_cpt.jsonl \
 	--report-path artifacts/reports/targeted_cpt_filter_summary.json \
 	--max-output-bytes 1073741824 \
-	--quality-score-min 9.0 \
+	--quality-score-min 0.7 \
 	--workers 16 \
 	--overwrite
 ```
