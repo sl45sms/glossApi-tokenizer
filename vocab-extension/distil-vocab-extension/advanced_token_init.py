@@ -61,42 +61,11 @@ def parse_args() -> argparse.Namespace:
 # ── Helpers ─────────────────────────────────────────────────────────────
 
 def _find_sentence_for_token(clean: str, args) -> str:
-    """Return a Greek sentence containing the token, or fallback template."""
-    # Cached sentence lookup
-    if not hasattr(_find_sentence_for_token, "cache"):
-        _find_sentence_for_token.cache = {}
-        try:
-            from datasets import load_dataset as _hf
-            ds = _hf("epfml/FineWeb2-HQ", "ell_Grek", split="train", streaming=True)
-            sents = []
-            for ex in ds:
-                for s in ex.get("text", "").replace("!", ".").replace(";", ".").split("."):
-                    s = s.strip()
-                    if 30 < len(s) < 250:
-                        sents.append(s)
-                if len(sents) >= 5000:
-                    break
-            _find_sentence_for_token.cache["sents"] = sents
-        except Exception:
-            _find_sentence_for_token.cache["sents"] = []
-    sents = _find_sentence_for_token.cache.get("sents", [])
-    for s in sents:
-        if clean in s:
-            return s
-    return f"Το {clean} είναι σημαντικό."
+    """Fallback template generator if text cache missing."""
+    return f"Η εξειδικευμένη λέξη {clean} χρησιμοποιείται σε αυτό το πλαίσιο."
 
 
-def _find_old_position(base_tok, old_ids, clean: str) -> int:
-    """Find the position AFTER the token text in the old tokenization."""
-    old_tokens = [base_tok.decode([tid.item()], clean_up_tokenization_spaces=False)
-                   for tid in old_ids]
-    joined = ""
-    for i, ot in enumerate(old_tokens):
-        joined += ot.lstrip("\u0120").replace("\u0120", " ")
-        if clean in joined or joined.strip().endswith(clean):
-            return min(i + 1, len(old_ids) - 1)
-    return len(old_ids) - 1
-
+# ── Single GPU Distillation (Fallback) ──────────────────────────────────
 
 def _distill_single(args, model, tokenizer, all_tokens, cache_dir, distill_layers, layer_weights):
     """Single GPU distillation (fallback)."""
@@ -140,7 +109,6 @@ def _distill_single(args, model, tokenizer, all_tokens, cache_dir, distill_layer
         print(f"Resumed at step {start_step}")
 
     batch_size = 64
-    # Pre-load all teacher targets into RAM (avoid disk I/O per step)
     print("Loading teacher cache into RAM...")
     all_targets = []
     for idx in range(len(all_tokens)):
@@ -158,11 +126,16 @@ def _distill_single(args, model, tokenizer, all_tokens, cache_dir, distill_layer
         for idx in indices:
             targets = all_targets[idx]
             if targets is None: continue
-            token_str = all_tokens[idx]  # KEEP leading space!
+            token_str = all_tokens[idx]
             clean = token_str.strip()
-            text = targets.get("text", _find_sentence_for_token(clean, args))
+            
+            if "text" in targets:
+                text = targets["text"]
+            else:
+                text = _find_sentence_for_token(clean, args)
+                
             new_ids_t = tokenizer.encode(text, add_special_tokens=True, return_tensors="pt").to(device)
-            new_tok_id = tokenizer.convert_tokens_to_ids(token_str)  # with space!
+            new_tok_id = tokenizer.convert_tokens_to_ids(token_str)
             if not isinstance(new_tok_id, int): continue
             pos_list = (new_ids_t[0] == new_tok_id).nonzero(as_tuple=True)[0]
             if len(pos_list) == 0: continue
@@ -176,7 +149,7 @@ def _distill_single(args, model, tokenizer, all_tokens, cache_dir, distill_layer
                 s_pred = s_out.hidden_states[layer + 1][0, new_pos, :]
                 loss = loss + w * torch.nn.functional.mse_loss(s_pred, t_tgt)
 
-            if not torch.isnan(loss) and 0 < loss.item() < 5000:
+            if not torch.isnan(loss) and 0 < loss.item() < 50000:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_([w_in], max_norm=1.0)
                 if w_in.grad is not None:
@@ -194,16 +167,7 @@ def _distill_single(args, model, tokenizer, all_tokens, cache_dir, distill_layer
             elapsed = _time.time() - _start_time
             eta = (elapsed/(step-start_step+1))*(args.distill_steps-step-1) if step > start_step else 0
             print(f"  step {step}/{args.distill_steps}  loss={avg:.2f}  lr={sched.get_last_lr()[0]:.2e}  "
-                  f"elapsed={elapsed:.0f}s  eta={eta:.0f}s")
-        if step % 50 == 0 and step > start_step:
-            ckpt_path = ckpt_dir / f"step_{step:05d}.pt"
-            torch.save({"step": step, "optimizer": opt.state_dict(), "scheduler": sched.state_dict(),
-                         "loss": avg, "w_in": w_in.detach().cpu(),
-                         "w_out": w_out.detach().cpu() if w_out is not None else None}, ckpt_path)
-            for old in sorted(ckpt_dir.glob("step_*.pt"))[:-3]:
-                old.unlink()
-    for p in model.parameters(): p.requires_grad = True
-    return None
+                  f"elapsed={elapsed:.0f}s  eta={eta:.0f}s", flush=True)
 
 
 # ── Worker entry point (for multi-GPU) ──────────────────────────────────
@@ -217,7 +181,7 @@ def _distill_worker(cfg_file: str):
     gpu = cfg["gpu"]
     global_indices = cfg.get("global_indices", list(range(len(cfg["tokens"]))))
     device = torch.device(f"cuda:0" if torch.cuda.is_available() else "cpu")
-    print(f"[GPU {gpu}] Starting worker with {len(cfg['tokens'])} tokens, {cfg['distill_steps']} steps")
+    print(f"[GPU {gpu}] Starting worker with {len(cfg['tokens'])} tokens, {cfg['distill_steps']} steps", flush=True)
 
     # Load model
     from transformers import AutoModelForCausalLM
@@ -241,7 +205,6 @@ def _distill_worker(cfg_file: str):
             if not src_ids: continue
             new_id = tokenizer.convert_tokens_to_ids(token)
             if not isinstance(new_id, int): continue
-            # ReTok init
             if len(src_ids) == 1:
                 emb = input_emb[src_ids[0]]
             elif len(src_ids) == 2:
@@ -252,7 +215,7 @@ def _distill_worker(cfg_file: str):
             if output_emb is not None and not tied:
                 output_emb[new_id].copy_(emb)
 
-    # Train
+    # Train setup
     for p in model.parameters(): p.requires_grad = False
     input_emb.requires_grad = True
     if output_emb is not None and not tied: output_emb.requires_grad = True
@@ -274,26 +237,37 @@ def _distill_worker(cfg_file: str):
     distill_layers = cfg["layers"]
     layer_weights = cfg["layer_weights"]
     batch_size = 64
-    _start = _time.time()
 
     for step in range(cfg["distill_steps"]):
-        # Sample LOCAL indices, then map to GLOBAL for cache lookup
         local_indices = _random.sample(range(len(cfg["tokens"])), min(batch_size, len(cfg["tokens"])))
         total_loss = 0.0
         skipped = 0
         for local_idx in local_indices:
             global_idx = global_indices[local_idx]
             cf = cache_dir / f"t_{global_idx:05d}.pt"
-            if not cf.exists(): continue
+            if not cf.exists(): 
+                skipped += 1
+                continue
             targets = torch.load(cf, map_location="cpu")
-            token_str = cfg["tokens"][local_idx].strip()
-            # Use the EXACT same sentence that was cached
-            text = targets.get("text", _find_sentence_for_token(token_str, cfg))
+            
+            token_str = cfg["tokens"][local_idx]
+            clean = token_str.strip()
+            
+            if "text" in targets:
+                text = targets["text"]
+            else:
+                text = _find_sentence_for_token(clean, cfg)
+                
             new_ids_t = tokenizer.encode(text, add_special_tokens=True, return_tensors="pt").to(device)
             new_tok_id = tokenizer.convert_tokens_to_ids(token_str)
-            if not isinstance(new_tok_id, int): continue
+            if not isinstance(new_tok_id, int): 
+                skipped += 1
+                continue
+                
             pos_list = (new_ids_t[0] == new_tok_id).nonzero(as_tuple=True)[0]
-            if len(pos_list) == 0: continue
+            if len(pos_list) == 0: 
+                skipped += 1
+                continue
             new_pos = pos_list[0].item()
 
             model.zero_grad(set_to_none=True)
@@ -304,14 +278,12 @@ def _distill_worker(cfg_file: str):
                 s_pred = s_out.hidden_states[layer + 1][0, new_pos, :]
                 loss = loss + w * torch.nn.functional.mse_loss(s_pred, t_tgt)
 
-            # Debug: log first 3 samples of step 0 to file
             if step == 0 and local_idx < 3:
                 log_file = Path(cfg["output_dir"]) / f"debug_gpu{gpu}.log"
                 with open(log_file, "a") as lf:
                     lf.write(f"step={step} local_idx={local_idx} global_idx={global_idx} "
                              f"loss={loss.item():.2f} new_pos={new_pos} text_len={len(text)}\n")
 
-            # Accept any non-NaN, non-zero loss
             if not torch.isnan(loss) and loss.item() != 0:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_([input_emb], max_norm=1.0)
@@ -329,7 +301,7 @@ def _distill_worker(cfg_file: str):
         sched.step()
         if step % 10 == 0 or step < 3:
             avg = total_loss / (len(local_indices) - skipped) if (len(local_indices) - skipped) > 0 else 0
-            print(f"[GPU {gpu}] step {step}/{cfg['distill_steps']}  loss={avg:.1f}  skipped={skipped}" if local_indices else "no samples")
+            print(f"[GPU {gpu}] step {step}/{cfg['distill_steps']}  loss={avg:.2f}  skipped={skipped}", flush=True)
 
     # Save embeddings
     out_file = Path(cfg["output_dir"]) / f"embeddings_gpu{gpu}.pt"
@@ -341,7 +313,8 @@ def _distill_worker(cfg_file: str):
             if output_emb is not None and not tied:
                 emb_data["output_embs"][str(tid)] = output_emb[tid].detach().cpu()
     torch.save(emb_data, out_file)
-    print(f"[GPU {gpu}] Saved embeddings to {out_file}")
+    print(f"[GPU {gpu}] Saved embeddings to {out_file}", flush=True)
+
 
 def resolve_torch_dtype(dtype_name: str):
     if dtype_name == "auto":
@@ -358,7 +331,6 @@ def load_bpe_merges(tokenizer_path: str) -> List[Tuple[str, str]]:
 
 
 def compute_weighted_mean(embeddings: torch.Tensor, source_ids: List[int]) -> torch.Tensor:
-    """Weight subtokens by inverse token ID (lower ID = more frequent = higher weight)."""
     if len(source_ids) == 1:
         return embeddings[source_ids[0]]
     weights = torch.tensor([1.0 / (tid + 1) for tid in source_ids],
@@ -368,11 +340,6 @@ def compute_weighted_mean(embeddings: torch.Tensor, source_ids: List[int]) -> to
 
 
 def compute_retok_mean(embeddings: torch.Tensor, source_ids: List[int]) -> torch.Tensor:
-    """ReTok approximation: E_new = (mean(first N-1) + last) / 2.
-
-    This follows the BPE merge logic where the final merge combines the
-    already-merged prefix with the last subtoken.
-    """
     if len(source_ids) == 1:
         return embeddings[source_ids[0]]
     if len(source_ids) == 2:
@@ -434,7 +401,6 @@ def initialize_embeddings_advanced(
 
     print(f"Initialized {stats['initialized']}  skipped {stats['skipped']}")
 
-    # ── Token Distillation ──────────────────────────────────────────
     if args.init_strategy == "retok-distill":
         print(f"\n=== Token Distillation  steps={args.distill_steps}  lr={args.distill_lr} ===")
         distillation_loss = run_token_distillation(
@@ -442,7 +408,6 @@ def initialize_embeddings_advanced(
         )
         stats["distillation_final_loss"] = distillation_loss
 
-    # ── Save ────────────────────────────────────────────────────────
     print(f"Saving model → {args.output_dir}")
     model.save_pretrained(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
@@ -458,11 +423,7 @@ def run_token_distillation(
     tokens_to_add: List[str],
     source_ids_map: Dict[str, List[int]],
 ) -> Optional[float]:
-    """Token Distillation v8: multi-GPU via independent chunk processing.
-
-    Splits tokens across GPUs using background processes, each
-    running distillation independently, then merges embeddings.
-    """
+    """Token Distillation v9: Deterministic Template + Subtoken Span Pooling."""
     import time as _time, random as _random, gc, os as _os, subprocess, pickle
     from transformers import AutoModelForCausalLM
 
@@ -475,36 +436,53 @@ def run_token_distillation(
                                     trust_remote_code=args.trust_remote_code)
     distill_layers = [4, 8, 16]
     layer_weights = [0.2, 0.5, 0.3]
-    num_layers = model.config.num_hidden_layers
 
     # ---- Pre-compute teacher cache (GPU 0) ----
     cache_dir = Path(args.output_dir) / "teacher_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     all_tokens = tokens_to_add[:args.distill_samples]
-    print(f"Pre-computing teacher cache for {len(all_tokens)} tokens...")
+    print(f"Pre-computing teacher cache for {len(all_tokens)} tokens using Deterministic Span Pooling...")
+    
     teacher = AutoModelForCausalLM.from_pretrained(
         args.base_model, trust_remote_code=args.trust_remote_code, dtype=dtype,
     ).to(device)
-    for p in teacher.parameters():
-        p.requires_grad = False
     teacher.eval()
+    
+    # Σταθερό Template Anchor για 100% ακρίβεια θέσης
+    prefix_str = "Η εξειδικευμένη λέξη "
+    suffix_str = " χρησιμοποιείται σε αυτό το πλαίσιο."
+    prefix_ids = base_tok.encode(prefix_str, add_special_tokens=True)
+    
     t0 = _time.time()
     for idx, token in enumerate(all_tokens):
         cache_file = cache_dir / f"t_{idx:05d}.pt"
         if cache_file.exists():
             continue
+            
         clean = token.strip()
-        text = _find_sentence_for_token(clean, args)
+        token_ids = base_tok.encode(clean, add_special_tokens=False)
+        if not token_ids:
+            continue
+            
+        text = f"{prefix_str}{clean}{suffix_str}"
         old_ids = base_tok.encode(text, add_special_tokens=True, return_tensors="pt").to(device)
-        old_pos = _find_old_position(base_tok, old_ids[0], clean)
+        
+        # Υπολογισμός των ακριβών ορίων των subtokens στον base tokenizer
+        start_pos = len(prefix_ids)
+        end_pos = start_pos + len(token_ids)
+        
         with torch.no_grad():
             t_out = teacher(old_ids, output_hidden_states=True)
-            targets = {"text": text}  # save sentence for worker to reuse
+            targets = {"text": text}
             for layer in distill_layers:
-                targets[str(layer)] = t_out.hidden_states[layer + 1][0, old_pos, :].cpu()
+                # Mean pooling πάνω στο ακριβές παράθυρο των παλιών subtokens
+                hidden_slice = t_out.hidden_states[layer + 1][0, start_pos:end_pos, :]
+                targets[str(layer)] = hidden_slice.mean(dim=0).cpu()
+                
         torch.save(targets, cache_file)
         if (idx + 1) % 100 == 0:
-            print(f"  cached {idx+1}/{len(all_tokens)}  eta={(_time.time()-t0)/(idx+1)*(len(all_tokens)-idx-1):.0f}s")
+            print(f"  cached {idx+1}/{len(all_tokens)}  eta={(_time.time()-t0)/(idx+1)*(len(all_tokens)-idx-1):.0f}s", flush=True)
+            
     del teacher; gc.collect()
     if torch.cuda.is_available(): torch.cuda.empty_cache()
     print(f"Cache done in {_time.time()-t0:.0f}s")
@@ -516,7 +494,6 @@ def run_token_distillation(
     # ---- MULTI GPU ----
     print(f"Starting multi-GPU distillation on {num_gpus} GPUs.")
 
-    # 1. Split tokens
     token_chunks: List[List[str]] = [[] for _ in range(num_gpus)]
     global_indices_chunks: List[List[int]] = [[] for _ in range(num_gpus)]
     for i, token in enumerate(all_tokens):
@@ -524,13 +501,11 @@ def run_token_distillation(
         token_chunks[gpu_idx].append(token)
         global_indices_chunks[gpu_idx].append(i)
 
-    # 2. Create worker configs and spawn processes
     worker_procs = []
     worker_configs = []
     tmp_dir = Path(args.output_dir) / "worker_tmp"
     tmp_dir.mkdir(exist_ok=True)
 
-    # Unload main model from GPU to free memory for workers
     model.to("cpu")
     if torch.cuda.is_available(): torch.cuda.empty_cache()
 
@@ -562,6 +537,7 @@ def run_token_distillation(
         script_path = Path(__file__).resolve()
         worker_env = _os.environ.copy()
         worker_env["CUDA_VISIBLE_DEVICES"] = str(i)
+        worker_env["PYTHONUNBUFFERED"] = "1" 
 
         cmd = [sys.executable, str(script_path), "--distill-worker", str(cfg_file)]
 
@@ -571,7 +547,6 @@ def run_token_distillation(
             proc = subprocess.Popen(cmd, env=worker_env, stdout=log, stderr=subprocess.STDOUT)
         worker_procs.append(proc)
 
-    # 3. Wait for workers
     num_finished = 0
     for proc in worker_procs:
         proc.wait()
@@ -584,7 +559,6 @@ def run_token_distillation(
     if num_finished != len(worker_procs):
         print("Some workers failed. Check logs. The resulting model will be incomplete.")
 
-    # 4. Merge embeddings
     print("All workers finished. Merging embeddings...")
     w_in = model.get_input_embeddings().weight
     out_layer = model.get_output_embeddings()
@@ -610,45 +584,12 @@ def run_token_distillation(
     except OSError: pass
 
     print("Embeddings merged.")
-    return 0.0  # Placeholder for success
-
-
-def _find_decoder_layer(model, target_idx: int):
-    """Find the decoder layer module at a given index."""
-    # Common patterns: model.layers[i], model.model.layers[i], model.model.decoder.layers[i]
-    for attr in ["model", "transformer", "gpt_neox"]:
-        base = getattr(model, attr, None)
-        if base is not None and hasattr(base, "layers"):
-            layers = base.layers
-            if target_idx < len(layers):
-                return layers[target_idx]
-
-    # Try direct layers
-    if hasattr(model, "layers"):
-        layers = model.layers
-        if target_idx < len(layers):
-            return layers[target_idx]
-
-    # Fallback: search by name
-    for name, mod in model.named_modules():
-        if not hasattr(mod, "self_attn"):
-            continue
-        parts = name.split(".")
-        for i, p in enumerate(parts):
-            if p == "layers" and i + 1 < len(parts):
-                try:
-                    idx = int(parts[i + 1])
-                except ValueError:
-                    continue
-                if idx == target_idx and hasattr(mod, "self_attn"):
-                    return mod
-    return None
+    return 0.0
 
 
 # ── Main ────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    # Handle worker mode BEFORE argparse (bypasses required args)
     if "--distill-worker" in sys.argv:
         idx = sys.argv.index("--distill-worker")
         if idx + 1 < len(sys.argv):
@@ -665,18 +606,15 @@ def main() -> None:
         else:
             raise SystemExit(f"Output dir exists: {args.output_dir}. Use --overwrite.")
 
-    # Load extended tokenizer
     print(f"Loading extended tokenizer  {args.extended_tokenizer}")
     tok = load_repo_tokenizer(str(args.extended_tokenizer), trust_remote_code=args.trust_remote_code)
     print(f"Vocab size: {len(tok)}")
 
-    # Load candidate tokens
     print(f"Loading candidates  {args.token_file}")
     raw = [line for line in args.token_file.read_text(encoding="utf-8").splitlines() if line.strip()]
     unique = list(dict.fromkeys(raw))
     print(f"{len(unique)} unique tokens")
 
-    # Build old-tokenizer subtoken map (use base tokenizer from artifacts)
     base_tok_path = "artifacts/tokenizers/apertus-base"
     print(f"Loading base tokenizer  {base_tok_path}")
     base_tok = load_repo_tokenizer(base_tok_path, trust_remote_code=args.trust_remote_code)
@@ -685,10 +623,8 @@ def main() -> None:
     for t in unique:
         source_map[t] = base_tok.encode(t, add_special_tokens=False)
 
-    # Initialize
     stats = initialize_embeddings_advanced(args, tok, unique, source_map)
 
-    # Report
     report = {
         "init_strategy": args.init_strategy,
         "token_file": str(args.token_file),
@@ -706,3 +642,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    
