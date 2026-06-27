@@ -18,6 +18,8 @@ echo " Layers: [4,8,16] weights=[0.2,0.5,0.3]"
 echo " Resume: YES (every 50 steps)"
 echo "========================================="
 
+# --distill-steps 1000 should be plenty (the good tokens converge by step ~500)
+
 ./run_uenv.sh python -u ${PROJECT_DIR}/vocab-extension/distil-vocab-extension/advanced_token_init.py \
   --token-file ${PROJECT_DIR}/artifacts/vocab_candidates/selected_tokens_v1.txt \
   --base-model swiss-ai/Apertus-8B-Instruct-2509 \
@@ -26,7 +28,7 @@ echo "========================================="
   --init-strategy retok-distill \
   --torch-dtype bfloat16 \
   --trust-remote-code \
-  --distill-steps 5000 \
+  --distill-steps 1000 \
   --distill-lr 1e-3 \
   --distill-samples 5000 \
   2>&1
