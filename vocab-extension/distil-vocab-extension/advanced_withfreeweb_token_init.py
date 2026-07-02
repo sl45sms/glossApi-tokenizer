@@ -45,8 +45,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--distill-steps", type=int, default=100,
                         help="Distillation steps for retok-distill.")
-    parser.add_argument("--distill-lr", type=float, default=1e-3,
-                        help="Learning rate for distillation.")
+    parser.add_argument("--distill-lr", type=float, default=5e-5,
+                        help="Safe Lower LR for stable embedding tuning (default: 5e-5).")
     parser.add_argument("--distill-samples", type=int, default=256,
                         help="Number of text samples for distillation.")
     parser.add_argument("--distill-layer", type=int, default=None,
@@ -69,7 +69,7 @@ def _find_sentence_for_token(clean: str, args) -> str:
 # ── Single GPU Distillation (Fallback) ──────────────────────────────────
 
 def _distill_single(args, model, tokenizer, all_tokens_expanded, cache_dir, distill_layers, layer_weights):
-    """Single GPU distillation (fallback) with Hybrid Loss (MSE + KL)."""
+    """Single GPU distillation (fallback) with Early MSE and Safe Low LR."""
     import time as _time, random as _random
     device = next(model.parameters()).device
     model = model.to(device)
@@ -96,6 +96,21 @@ def _distill_single(args, model, tokenizer, all_tokens_expanded, cache_dir, dist
     if hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
 
+    ckpt_dir = Path(args.output_dir) / "distill_checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    start_step = 0
+    
+    ckpt_path = ckpt_dir / "single_gpu_checkpoint.pt"
+    if ckpt_path.exists():
+        print(f"Found checkpoint {ckpt_path}. Resuming single GPU training...", flush=True)
+        ckpt = torch.load(ckpt_path, map_location=device)
+        start_step = ckpt["step"] + 1
+        w_in.data.copy_(ckpt["w_in"].to(device))
+        if w_out is not None and not tied:
+            w_out.data.copy_(ckpt["w_out"].to(device))
+        opt.load_state_dict(ckpt["optimizer"])
+        sched.load_state_dict(ckpt["scheduler"])
+
     print("Loading teacher cache into RAM...")
     all_targets = []
     for idx in range(len(all_tokens_expanded)):
@@ -104,10 +119,10 @@ def _distill_single(args, model, tokenizer, all_tokens_expanded, cache_dir, dist
             all_targets.append(torch.load(cf, map_location="cpu"))
         else:
             all_targets.append(None)
-    print(f"Loaded {sum(1 for t in all_targets if t is not None)}/{len(all_targets)} target samples into RAM")
+    print(f"Loaded {sum(1 for t in all_targets if t is not None)}/{len(all_targets)} targets into RAM")
 
     _start_time = _time.time()
-    for step in range(0, args.distill_steps):
+    for step in range(start_step, args.distill_steps):
         indices = _random.sample(range(len(all_tokens_expanded)), min(64, len(all_tokens_expanded)))
         total_loss = 0.0
         for idx in indices:
@@ -126,26 +141,11 @@ def _distill_single(args, model, tokenizer, all_tokens_expanded, cache_dir, dist
             model.zero_grad(set_to_none=True)
             s_out = model(input_ids=new_ids_t, output_hidden_states=True)
             
-            # MSE Loss (Hidden States)
-            loss_mse = torch.tensor(0.0, device=device)
+            loss = torch.tensor(0.0, device=device)
             for layer, w in zip(distill_layers, layer_weights):
                 t_tgt = targets[str(layer)].to(device)
                 s_pred = s_out.hidden_states[layer + 1][0, new_pos, :]
-                loss_mse = loss_mse + w * F.mse_loss(s_pred, t_tgt)
-
-            # KL Divergence Loss (Logits Alignment με δυναμικό Slicing)
-            T = 2.0
-            teacher_logits = targets["logits"].to(device)
-            student_logits = s_out.logits[0, new_pos, :]
-            
-            vocab_size_old = teacher_logits.shape[-1]
-            loss_kl = F.kl_div(
-                F.log_softmax(student_logits[:vocab_size_old] / T, dim=-1),
-                F.softmax(teacher_logits / T, dim=-1),
-                reduction="batchmean"
-            ) * (T ** 2)
-
-            loss = loss_mse + 0.1 * loss_kl
+                loss = loss + w * F.mse_loss(s_pred, t_tgt)
 
             if not torch.isnan(loss) and loss.item() != 0:
                 loss.backward()
@@ -160,18 +160,31 @@ def _distill_single(args, model, tokenizer, all_tokens_expanded, cache_dir, dist
                 total_loss += loss.item()
 
         sched.step()
+        
+        if step > start_step and step % 50 == 0:
+            torch.save({
+                "step": step,
+                "w_in": w_in.detach().cpu(),
+                "w_out": w_out.detach().cpu() if w_out is not None and not tied else None,
+                "optimizer": opt.state_dict(),
+                "scheduler": sched.state_dict()
+            }, ckpt_path)
+
         if step % 10 == 0 or step < 3 or step == args.distill_steps - 1:
             avg = total_loss / len(indices) if indices else 0
             elapsed = _time.time() - _start_time
-            eta = (elapsed/(step+1))*(args.distill_steps-step-1) if step > 0 else 0
-            print(f"  step {step}/{args.distill_steps}  loss={avg:.2f}  lr={sched.get_last_lr()[0]:.2e}  "
+            eta = (elapsed/(step - start_step + 1))*(args.distill_steps-step-1) if step > start_step else 0
+            print(f"  step {step}/{args.distill_steps}  loss={avg:.4f}  lr={sched.get_last_lr()[0]:.2e}  "
                   f"elapsed={elapsed:.0f}s  eta={eta:.0f}s", flush=True)
+                  
+    if ckpt_path.exists():
+        ckpt_path.unlink()
 
 
 # ── Worker entry point (for multi-GPU) ──────────────────────────────────
 
 def _distill_worker(cfg_file: str):
-    """Run distillation on a chunk of token-context pairs (single GPU)."""
+    """Run early-layer MSE distillation with 100% RAM Pre-loaded Cache (No Disk Bottlenecks)."""
     import pickle
     with open(cfg_file, "rb") as f:
         cfg = pickle.load(f)
@@ -190,7 +203,6 @@ def _distill_worker(cfg_file: str):
     tokenizer = load_repo_tokenizer(cfg["extended_tokenizer"], trust_remote_code=cfg["trust_remote_code"])
     model.resize_token_embeddings(len(tokenizer), mean_resizing=False)
 
-    # Initialize unique tokens with ReTok
     input_emb = model.get_input_embeddings().weight
     out_layer = model.get_output_embeddings()
     output_emb = out_layer.weight if out_layer is not None else None
@@ -231,23 +243,46 @@ def _distill_worker(cfg_file: str):
     model.train()
     if hasattr(model, "gradient_checkpointing_enable"): model.gradient_checkpointing_enable()
 
+    # Load worker checkpoint if exists
+    start_step = 0
+    ckpt_path = Path(cfg["output_dir"]) / f"checkpoint_worker_gpu{gpu}.pt"
+    if ckpt_path.exists():
+        print(f"[GPU {gpu}] Found active checkpoint. Resuming training...", flush=True)
+        ckpt = torch.load(ckpt_path, map_location=device)
+        start_step = ckpt["step"] + 1
+        input_emb.data.copy_(ckpt["input_emb"].to(device))
+        if output_emb is not None and not tied:
+            output_emb.data.copy_(ckpt["output_emb"].to(device))
+        opt.load_state_dict(ckpt["optimizer"])
+        sched.load_state_dict(ckpt["scheduler"])
+
+    # ── ΔΙΟΡΘΩΣΗ: Pre-loading των targets στη RAM του Worker για εξαφάνιση του I/O Bottleneck ──
     import random as _random, time as _time
     cache_dir = Path(cfg["cache_dir"])
+    print(f"[GPU {gpu}] Pre-loading cache targets into node RAM...", flush=True)
+    worker_targets = {}
+    for local_idx, global_idx in enumerate(global_indices):
+        cf = cache_dir / f"t_{global_idx:06d}.pt"
+        if cf.exists():
+            worker_targets[local_idx] = torch.load(cf, map_location="cpu")
+        else:
+            worker_targets[local_idx] = None
+    print(f"[GPU {gpu}] Memory loading done. Active samples in RAM: {sum(1 for x in worker_targets.values() if x is not None)}", flush=True)
+
     distill_layers = cfg["layers"]
     layer_weights = cfg["layer_weights"]
     batch_size = 64
 
-    for step in range(cfg["distill_steps"]):
+    for step in range(start_step, cfg["distill_steps"]):
         local_indices = _random.sample(range(len(cfg["tokens"])), min(batch_size, len(cfg["tokens"])))
         total_loss = 0.0
         skipped = 0
         for local_idx in local_indices:
-            global_idx = global_indices[local_idx]
-            cf = cache_dir / f"t_{global_idx:06d}.pt"
-            if not cf.exists(): 
+            # Διαβάζουμε απευθείας από τη RAM (In-Memory Processing)
+            targets = worker_targets.get(local_idx)
+            if targets is None: 
                 skipped += 1
                 continue
-            targets = torch.load(cf, map_location="cpu")
             
             token_str = cfg["tokens"][local_idx]
             text = targets["text"]
@@ -267,34 +302,16 @@ def _distill_worker(cfg_file: str):
             model.zero_grad(set_to_none=True)
             s_out = model(input_ids=new_ids_t, output_hidden_states=True)
             
-            # 1. MSE Loss (Hidden States Anchor)
-            loss_mse = torch.tensor(0.0, device=device)
+            loss = torch.tensor(0.0, device=device)
             for layer, w in zip(distill_layers, layer_weights):
                 t_tgt = targets[str(layer)].to(device)
                 s_pred = s_out.hidden_states[layer + 1][0, new_pos, :]
-                loss_mse = loss_mse + w * F.mse_loss(s_pred, t_tgt)
+                loss = loss + w * F.mse_loss(s_pred, t_tgt)
 
-            # 2. KL Divergence Loss (Logits Alignment με δυναμικό Slicing)
-            T = 2.0
-            teacher_logits = targets["logits"].to(device)
-            student_logits = s_out.logits[0, new_pos, :]
-            
-            vocab_size_old = teacher_logits.shape[-1]
-            loss_kl = F.kl_div(
-                F.log_softmax(student_logits[:vocab_size_old] / T, dim=-1),
-                F.softmax(teacher_logits / T, dim=-1),
-                reduction="batchmean"
-            ) * (T ** 2)
-
-            # Hybrid Loss Function
-            loss = loss_mse + 0.1 * loss_kl
-
-            if step == 0 and local_idx < 3:
+            if step == start_step and local_idx < 3:
                 log_file = Path(cfg["output_dir"]) / f"debug_gpu{gpu}.log"
                 with open(log_file, "a") as lf:
-                    lf.write(f"step={step} local_idx={local_idx} global_idx={global_idx} "
-                             f"loss={loss.item():.2f} mse={loss_mse.item():.2f} kl={loss_kl.item():.2f} "
-                             f"new_pos={new_pos}\n")
+                    lf.write(f"step={step} local_idx={local_idx} global_idx={global_indices[local_idx]} loss={loss.item():.4f}\n")
 
             if not torch.isnan(loss) and loss.item() != 0:
                 loss.backward()
@@ -311,11 +328,21 @@ def _distill_worker(cfg_file: str):
                 skipped += 1
 
         sched.step()
+        
+        if step > start_step and step % 50 == 0:
+            torch.save({
+                "step": step,
+                "input_emb": input_emb.detach().cpu(),
+                "output_emb": output_emb.detach().cpu() if output_emb is not None and not tied else None,
+                "optimizer": opt.state_dict(),
+                "scheduler": sched.state_dict()
+            }, ckpt_path)
+
         if step % 10 == 0 or step < 3:
             avg = total_loss / (len(local_indices) - skipped) if (len(local_indices) - skipped) > 0 else 0
-            print(f"[GPU {gpu}] step {step}/{cfg['distill_steps']}  loss={avg:.2f}  skipped={skipped}", flush=True)
+            print(f"[GPU {gpu}] step {step}/{cfg['distill_steps']}  loss={avg:.4f}  skipped={skipped}", flush=True)
 
-    # Save embeddings
+    # Save final embeddings
     out_file = Path(cfg["output_dir"]) / f"embeddings_gpu{gpu}.pt"
     emb_data = {"input_embs": {}, "output_embs": {}}
     for token in unique_tokens:
@@ -326,6 +353,9 @@ def _distill_worker(cfg_file: str):
                 emb_data["output_embs"][str(tid)] = output_emb[tid].detach().cpu()
     torch.save(emb_data, out_file)
     print(f"[GPU {gpu}] Saved embeddings to {out_file}", flush=True)
+    
+    if ckpt_path.exists():
+        ckpt_path.unlink()
 
 
 def resolve_torch_dtype(dtype_name: str):
@@ -435,7 +465,7 @@ def run_token_distillation(
     tokens_to_add: List[str],
     source_ids_map: Dict[str, List[int]],
 ) -> Optional[float]:
-    """Token Distillation v11: FineWeb2-HQ Streaming + Integer Subsequence ID Matching."""
+    """Token Distillation v14: FineWeb2-HQ Streaming + Integer Subsequence ID Matching + Multi-GPU Checkpointing."""
     import time as _time, random as _random, gc, os as _os, subprocess, pickle
     from transformers import AutoModelForCausalLM
 
@@ -445,17 +475,21 @@ def run_token_distillation(
 
     base_tok = load_repo_tokenizer("artifacts/tokenizers/apertus-base",
                                     trust_remote_code=args.trust_remote_code)
+    
+    #distill_layers = [1, 2]
+    #layer_weights = [0.5, 0.5]
+    # το MSE στα layers 1-2 πιάνει μόνο positional/lexical features — όχι σημασιολογία. Τα layers 4-16 περιέχουν semantic content που χρειάζεται το MMLU.
     distill_layers = [4, 8, 16]
     layer_weights = [0.2, 0.5, 0.3]
 
-    # ---- 100% Deterministic ID Subsequence Matcher ----
+    # ── ΔΙΟΡΘΩΣΗ: Επιστρέφει το πρώτο match ακόμα κι αν η λέξη εμφανίζεται 2+ φορές στην ίδια πρόταση
     def _find_id_subsequence(main_list: List[int], sub_list: List[int]) -> Optional[Tuple[int, int]]:
         matches = []
         n, m = len(main_list), len(sub_list)
         for i in range(n - m + 1):
             if main_list[i : i + m] == sub_list:
                 matches.append((i, i + m))
-        return matches[0] if len(matches) == 1 else None
+        return matches[0] if matches else None
 
     # ---- Pre-compute teacher cache ----
     cache_dir = Path(args.output_dir) / "teacher_cache"
@@ -466,7 +500,7 @@ def run_token_distillation(
     from datasets import load_dataset as _hf
     ds = _hf("epfml/FineWeb2-HQ", "ell_Grek", split="train", streaming=True)
     
-    print(f"Pre-computing teacher cache for {len(all_tokens)} tokens using real language data...")
+    print(f"Pre-computing teacher cache for {len(all_tokens)} tokens using early layer hidden states...")
     
     teacher = AutoModelForCausalLM.from_pretrained(
         args.base_model, trust_remote_code=args.trust_remote_code, dtype=dtype,
@@ -488,7 +522,6 @@ def run_token_distillation(
         found_contexts = 0
         attempts = 0
         
-        # Αναζήτηση πραγματικών contexts από το FineWeb stream
         while found_contexts < CONTEXTS_PER_TOKEN and attempts < 1500:
             attempts += 1
             try:
@@ -509,7 +542,6 @@ def run_token_distillation(
                 old_ids_tensor = base_tok.encode(sentence, add_special_tokens=True, return_tensors="pt").to(device)
                 old_ids_list = old_ids_tensor[0].tolist()
                 
-                # Έλεγχος για Exact Subsequence Match (Μηδενικό Alignment Error)
                 bounds = _find_id_subsequence(old_ids_list, token_ids)
                 if bounds is None:
                     continue
@@ -533,15 +565,13 @@ def run_token_distillation(
                         hidden_slice = t_out.hidden_states[layer + 1][0, start_pos:end_pos, :]
                         targets[str(layer)] = hidden_slice.mean(dim=0).cpu()
                     
-                    targets["logits"] = t_out.logits[0, end_pos - 1, :].cpu()
-                    
                 torch.save(targets, cache_file)
                 found_contexts += 1
                 cache_idx += 1
                 if found_contexts >= CONTEXTS_PER_TOKEN:
                     break
 
-        # Διασφάλιση σταθερότητας: fallback templates αν χρειαστεί
+        # Fallback templates
         if found_contexts < CONTEXTS_PER_TOKEN:
             while found_contexts < CONTEXTS_PER_TOKEN:
                 fallback_text = f"Η εξειδικευμένη λέξη {clean} χρησιμοποιείται σε αυτό το πλαίσιο."
@@ -561,7 +591,6 @@ def run_token_distillation(
                         for layer in distill_layers:
                             hidden_slice = t_out.hidden_states[layer + 1][0, start_pos:end_pos, :]
                             targets[str(layer)] = hidden_slice.mean(dim=0).cpu()
-                        targets["logits"] = t_out.logits[0, end_pos - 1, :].cpu()
                     torch.save(targets, cache_file)
                 found_contexts += 1
                 cache_idx += 1
@@ -571,7 +600,7 @@ def run_token_distillation(
             
     del teacher; gc.collect()
     if torch.cuda.is_available(): torch.cuda.empty_cache()
-    print(f"Cache generated successfully with real text ({cache_idx} samples) in {_time.time()-t0:.0f}s")
+    print(f"Cache generated successfully ({cache_idx} samples) in {_time.time()-t0:.0f}s")
 
     use_parallel = num_gpus >= 2 and cache_idx > 250
     if not use_parallel:
@@ -690,11 +719,15 @@ def main() -> None:
 
     if not args.token_file.exists():
         raise SystemExit(f"Token file not found: {args.token_file}")
+        
     if args.output_dir.exists():
         if args.overwrite:
+            print(f"Wiping output directory as requested by --overwrite: {args.output_dir}")
             shutil.rmtree(args.output_dir)
         else:
-            raise SystemExit(f"Output dir exists: {args.output_dir}. Use --overwrite.")
+            print(f"Output directory exists. Entering RESUME mode (reusing cache and active checkpoints)...")
+    else:
+        args.output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Loading extended tokenizer  {args.extended_tokenizer}")
     tok = load_repo_tokenizer(str(args.extended_tokenizer), trust_remote_code=args.trust_remote_code)
