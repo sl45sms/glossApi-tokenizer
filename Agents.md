@@ -53,13 +53,13 @@ The intended workflow is:
 1. Reuse or regenerate the extended tokenizer under `artifacts/tokenizers/apertus-greek-v1`.
 2. Create a model checkpoint whose embeddings are resized and initialized for that tokenizer.
 3. Point `CPT/cpt.py` at that aligned checkpoint through `model_path`.
-4. Launch a single-node Clariden CPT run with 4 GPUs using `torchrun`.
+4. Launch a single-node Clariden CPT run with 4 GPUs using `python -m torch.distributed.run`.
 5. Validate checkpoint save/reload and only then scale the run length or cluster shape.
 
 Important constraints:
 
 - Extending a tokenizer changes the embedding matrix shape. The model must be loaded and resized with the updated tokenizer before training or inference.
-- `CPT/cpt.py` only gets the intended 4-GPU global batch if it is launched with a distributed launcher such as `torchrun --nproc_per_node=4`. A plain `python CPT/cpt.py` run will stay single-process.
+- `CPT/cpt.py` only gets the intended 4-GPU global batch if it is launched with a distributed launcher such as `python -m torch.distributed.run --nproc_per_node=4`. A plain `python CPT/cpt.py` run will stay single-process.
 
 ## 3. Clariden environment strategy
 
@@ -395,11 +395,11 @@ Start with a single Clariden node:
 
 - 1 node
 - 4 GPUs
-- 1 Slurm task that launches 4 local training workers with `torchrun`
+- 1 Slurm task that launches 4 local training workers with `python -m torch.distributed.run --nproc_per_node=4`
 
 Important constraint:
 
-- The batch-size comment inside `CPT/cpt.py` assumes 4 GPUs. That is only true if the job is launched with `torchrun --nproc_per_node=4` or an equivalent distributed launcher.
+- The batch-size comment inside `CPT/cpt.py` assumes 4 GPUs. That is only true if the job is launched with `python -m torch.distributed.run --nproc_per_node=4` or an equivalent distributed launcher.
 - If you run `python CPT/cpt.py` directly, `Trainer` will stay single-process and the effective global batch will be smaller than intended.
 
 Treat the current script as a single-node Clariden starting point. Only move to multi-node after the one-node path is stable; multi-node training will require a proper distributed launcher and the explicit Clariden network settings from section 3.5.
@@ -442,7 +442,7 @@ srun --environment="${CE_ENVIRONMENT}" --ntasks=1 bash -lc '
 '
 ```
 
-This launcher deliberately uses a single Slurm task and lets `torchrun` spawn the 4 local worker processes inside the Clariden container.
+This launcher deliberately uses a single Slurm task and lets `python -m torch.distributed.run --nproc_per_node=4` spawn the 4 local worker processes inside the Clariden container.
 
 ### 6.5 First-run strategy
 
@@ -494,7 +494,7 @@ Before accepting the new tokenizer and model, verify:
 - the aligned checkpoint can be loaded with the new tokenizer
 - `len(tokenizer)` matches the checkpoint embedding matrix size
 - the training paths used in `CPT/cpt.py` are visible inside the Clariden container
-- the job is launched with `torchrun` and sees all 4 Clariden GPUs
+- the job is launched with `python -m torch.distributed.run --nproc_per_node=4` and sees all 4 Clariden GPUs
 - Greek sample text uses fewer or better tokens than before
 - no special tokens were broken or removed
 - training data preprocessing is consistent across runs
@@ -517,7 +517,7 @@ The practical order for this repository should be:
 3. Reuse or regenerate the base and extended tokenizer artifacts.
 4. Create or reuse the aligned checkpoint with `scripts/extend_apertus_tokenizer.py --base-model`.
 5. Set `model_path` and `output_dir` in `CPT/cpt.py` to mounted persistent storage.
-6. Run a short single-node Clariden smoke test with `torchrun`.
+6. Run a short single-node Clariden smoke test with `python -m torch.distributed.run --nproc_per_node=4`.
 7. Launch the longer 4-GPU CPT job.
 8. Reload the saved checkpoint and evaluate Greek behavior.
 9. Only then consider multi-node scaling.
