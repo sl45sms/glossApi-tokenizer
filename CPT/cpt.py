@@ -920,11 +920,13 @@ def save_final_checkpoint(trainer: Trainer, tokenizer, output_dir: str, model_pa
         # tokenizer_config.json with expanded added_tokens_decoder, changes
         # padding_side, and alters the tokenizer_class, which can cause
         # evaluation regressions (e.g. GreekMMLU drops ~2%).
+        # NOTE: chat_template.jinja and special_tokens_map.json are deliberately
+        # NOT copied — the CPT model is raw-text (not instruct) and the original
+        # chat template is incompatible with the extended Greek tokenizer.
         if model_path:
             import shutil
             model_dir = Path(model_path)
-            for fname in ("tokenizer.json", "tokenizer_config.json",
-                          "special_tokens_map.json", "chat_template.jinja"):
+            for fname in ("tokenizer.json", "tokenizer_config.json"):
                 src = model_dir / fname
                 if src.exists():
                     shutil.copy2(str(src), str(final_dir / fname))
