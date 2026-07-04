@@ -909,13 +909,27 @@ def save_run_config(args: argparse.Namespace, current_world_size: int, tokenizer
     )
 
 
-def save_final_checkpoint(trainer: Trainer, tokenizer, output_dir: str) -> None:
+def save_final_checkpoint(trainer: Trainer, tokenizer, output_dir: str, model_path: str | None = None) -> None:
     final_dir = Path(output_dir) / "final"
     ensure_output_dir(final_dir)
     maybe_barrier()
     trainer.save_model(str(final_dir))
     if trainer.is_world_process_zero():
-        tokenizer.save_pretrained(str(final_dir))
+        # Copy the original tokenizer files from the model path instead of
+        # re-serializing with tokenizer.save_pretrained(). The latter rewrites
+        # tokenizer_config.json with expanded added_tokens_decoder, changes
+        # padding_side, and alters the tokenizer_class, which can cause
+        # evaluation regressions (e.g. GreekMMLU drops ~2%).
+        if model_path:
+            import shutil
+            model_dir = Path(model_path)
+            for fname in ("tokenizer.json", "tokenizer_config.json",
+                          "special_tokens_map.json", "chat_template.jinja"):
+                src = model_dir / fname
+                if src.exists():
+                    shutil.copy2(str(src), str(final_dir / fname))
+        else:
+            tokenizer.save_pretrained(str(final_dir))
         trainer.state.save_to_json(str(final_dir / "trainer_state.json"))
     maybe_barrier()
 
@@ -1004,7 +1018,7 @@ def main() -> None:
         rank_zero_print("Benchmark mode enabled: skipping final checkpoint export.")
         return
 
-    save_final_checkpoint(trainer, tokenizer, args.output_dir)
+    save_final_checkpoint(trainer, tokenizer, args.output_dir, model_path=args.model_path)
     rank_zero_print(f"Saved final CPT checkpoint to {Path(args.output_dir) / 'final'}")
 
 

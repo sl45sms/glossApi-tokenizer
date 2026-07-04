@@ -963,7 +963,17 @@ def main() -> None:
     model.config.use_cache = True
     trainer.save_model(args.output_dir)
     if is_world_process_zero():
-        tokenizer.save_pretrained(args.output_dir)
+        # Copy original tokenizer files instead of re-serializing.
+        # tokenizer.save_pretrained() rewrites tokenizer_config.json with
+        # expanded added_tokens_decoder and altered padding_side, which can
+        # cause ~2% GreekMMLU regression (same bug as CPT/cpt.py).
+        import shutil
+        model_dir = Path(args.model_path)
+        for fname in ("tokenizer.json", "tokenizer_config.json",
+                      "special_tokens_map.json", "chat_template.jinja"):
+            src = model_dir / fname
+            if src.exists():
+                shutil.copy2(str(src), str(Path(args.output_dir) / fname))
 
 
 if __name__ == "__main__":
