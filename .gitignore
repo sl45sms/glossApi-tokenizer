@@ -2,6 +2,7 @@ __pycache__
 .env
 .venv/
 .venv-uenv/
+.venv-uenv.backup/
 artifacts/*
 trash/*
 core_*
