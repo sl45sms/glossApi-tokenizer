@@ -32,6 +32,15 @@ sbatch vocab-extension/retok-cpt/run_retok_cpt_smoke.sh
 sbatch vocab-extension/retok-cpt/run_retok_cpt_multinode.sh
 ```
 
+### Step 3.1: Evaluate
+```bash
+# GreekMMLU
+./run_uenv.sh python evaluation/evaluate_greek_mmlu.py \
+  --base-model swiss-ai/Apertus-8B-Instruct-2509 \
+  --trained-model "/capstor/scratch/cscs/p-skarvelis/apertus-greek-cpt-retok-v2/final" \
+  --output-json artifacts/reports/greek_mmlu_retok_cpt_v2_eval.json \
+  --no-use-chat-template
+
 ### Step 4: SFT — restore chat ability
 
 **Smoke test first (20 steps, ~5 min):**
@@ -50,7 +59,8 @@ sbatch vocab-extension/retok-cpt/run_retok_sft.sh
 ./run_uenv.sh python evaluation/evaluate_greek_mmlu.py \
   --base-model swiss-ai/Apertus-8B-Instruct-2509 \
   --trained-model "/capstor/scratch/cscs/${USER}/apertus-greek-sft-retok/final" \
-  --output-json artifacts/reports/greek_mmlu_retok_sft_eval.json
+  --output-json artifacts/reports/greek_mmlu_retok_sft_eval.json \
+  --no-use-chat-template
 
 # Chat test
 ./run_model_ui.sh --base-device cuda:0 --device cuda:1 \

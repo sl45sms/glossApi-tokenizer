@@ -50,6 +50,8 @@ Useful flags:
 - `--refresh-base-report-cache` to force a fresh base-model evaluation instead of reusing the cached one
 - `--refresh-krikri-report-cache` to force a fresh Krikri evaluation instead of reusing the cached one
 - `--no-evaluate-krikri` to skip the Krikri reference lane entirely
+- `--no-use-chat-template` to avoid the default chat-style prompt template.Always use that for the comparison models (base,krikri), and use it for the trained model if it was trained with chat-style prompts.
+- `--no-xielu` to disable the xIELU CUDA kernel and force the Python fallback. Do not use it if the models trained with xIELU, as the fallback will be slower and produces different results. Use it only for debugging or if the GPU does not support xIELU.
 
 The output report includes overall accuracy, group-wise accuracy, subject-wise accuracy, level-wise accuracy, the trained-minus-base accuracy deltas, and when Krikri is enabled the Krikri-vs-base and trained-vs-Krikri comparisons.
 
