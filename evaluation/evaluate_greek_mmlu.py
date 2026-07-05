@@ -24,6 +24,36 @@ if str(REPO_ROOT) not in sys.path:
 from repo_tokenizer import load_repo_tokenizer
 
 
+# ---------------------------------------------------------------------------
+# xIELU CUDA-kernel detection
+# The Apertus model family uses xIELU activations.  When the nickjbrowning/XIELU
+# wheel is installed, transformers automatically picks up the fused CUDA kernel
+# instead of the pure-Python fallback, which yields a substantial inference
+# speed-up.  This helper mirrors the xielu_import check used in the Clariden
+# container build script so evaluation runs can verify the kernel is active.
+# ---------------------------------------------------------------------------
+
+def _detect_xielu_cuda() -> Dict[str, Any]:
+	"""Return a dict describing whether the xIELU CUDA kernel is available."""
+	info: Dict[str, Any] = {
+		"xielu_cuda_available": False,
+		"xielu_cuda_message": "",
+	}
+	try:
+		import xielu.ops  # noqa: F401
+
+		_ = torch.classes.xielu.XIELU()
+		info["xielu_cuda_available"] = True
+		info["xielu_cuda_message"] = "xIELU CUDA kernel loaded successfully."
+	except Exception as exc:
+		info["xielu_cuda_message"] = (
+			f"xIELU CUDA kernel not available ({exc}). "
+			"Falling back to Python xIELU – inference will be slower. "
+			"Install with: pip install git+https://github.com/nickjbrowning/XIELU"
+		)
+	return info
+
+
 DEFAULT_BASE_MODEL = "swiss-ai/Apertus-8B-Instruct-2509"
 DEFAULT_KRIKRI_MODEL = "ilsp/Llama-Krikri-8B-Instruct"
 DEFAULT_MAISTROS_MODEL = "IMISLab/Maistros-8B-Instruct"
@@ -193,6 +223,12 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument(
 		"--attn-implementation",
 		help="Optional attention backend passed to model loading, e.g. sdpa or flash_attention_2.",
+	)
+	parser.add_argument(
+		"--xielu",
+		action=argparse.BooleanOptionalAction,
+		default=True,
+		help="Attempt to use the xIELU CUDA kernel when available. Disable to force the Python fallback.",
 	)
 	parser.add_argument(
 		"--trust-remote-code",
@@ -759,6 +795,7 @@ def build_report(
 	krikri_report_cache_hit: bool,
 	maistros_report_cache_path: Optional[Path],
 	maistros_report_cache_hit: bool,
+	xielu_info: Dict[str, Any],
 ) -> Dict[str, Any]:
 	models: Dict[str, Dict[str, Any]] = {
 		"base": base_report,
@@ -874,6 +911,8 @@ def build_report(
 			"use_chat_template": args.use_chat_template,
 			"trust_remote_code": args.trust_remote_code,
 			"attn_implementation": args.attn_implementation,
+			"xielu_cuda_available": xielu_info["xielu_cuda_available"],
+			"xielu_cuda_message": xielu_info["xielu_cuda_message"],
 		},
 		"models": models,
 		"cache": {
@@ -931,6 +970,9 @@ def main() -> None:
 		file=sys.stderr,
 		flush=True,
 	)
+
+	xielu_info = _detect_xielu_cuda() if args.xielu else {"xielu_cuda_available": False, "xielu_cuda_message": "xIELU disabled by --no-xielu flag."}
+	print(xielu_info["xielu_cuda_message"], file=sys.stderr, flush=True)
 
 	base_report_cache_hit = False
 	base_report: Optional[Dict[str, Any]] = None
@@ -1088,6 +1130,7 @@ def main() -> None:
 		krikri_report_cache_hit=krikri_report_cache_hit,
 		maistros_report_cache_path=maistros_report_cache_path,
 		maistros_report_cache_hit=maistros_report_cache_hit,
+		xielu_info=xielu_info,
 	)
 
 	output_path = Path(args.output_json)
@@ -1096,6 +1139,7 @@ def main() -> None:
 
 	summary = {
 		"output_json": str(output_path),
+		"xielu_cuda_available": xielu_info["xielu_cuda_available"],
 		"base_report_cache": str(base_report_cache_path) if base_report_cache_path is not None else None,
 		"base_report_cache_hit": base_report_cache_hit,
 		"krikri_report_cache": str(krikri_report_cache_path) if krikri_report_cache_path is not None else None,
