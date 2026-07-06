@@ -25,8 +25,8 @@ export HF_DATASETS_CACHE="${SCRATCH}/FineWeb2-HQ"
 mkdir -p "${HF_DATASETS_CACHE}"
 
 echo "========================================="
-echo " Token Distillation ${VERSION} — $(date)"
-echo " Approach: Aho-Corasick + embedding regularization + timeout"
+echo " Unified Token Distillation ${VERSION} — $(date)"
+echo " Approach: Aho-Corasick + distributed row-sync + xIELU required"
 echo " GPU: 4, Samples: 5000, Steps: 500, Batch: 16"
 echo " Contexts/token: 8, Max seq len: 1024, LR warmup: 50 steps"
 echo " LR: 1e-5, Reg weight: 0.1, Stream timeout: 600s"
@@ -34,14 +34,17 @@ echo " FineWeb2-HQ cache: ${HF_DATASETS_CACHE}"
 echo " Log: ${LOG_DIR}/distill_v18_${SLURM_JOB_ID}_console.log"
 echo "========================================="
 
-# Safer distillation: fewer steps, lower LR, embedding regularization, stream timeout
-./run_uenv.sh python -u ${PROJECT_DIR}/vocab-extension/distil-vocab-extension/advanced_with_freeweb_and_casual_lm.py \
+# Unified distillation with distributed torchrun on all local GPUs.
+./run_uenv.sh python -u -m torch.distributed.run --standalone --nproc_per_node=4 \
+  ${PROJECT_DIR}/vocab-extension/distil-vocab-extension/unified_token_distill.py \
   --token-file ${PROJECT_DIR}/artifacts/vocab_candidates/selected_tokens_v1.txt \
+  --base-tokenizer ${PROJECT_DIR}/artifacts/tokenizers/apertus-base \
   --base-model swiss-ai/Apertus-8B-Instruct-2509 \
   --extended-tokenizer ${PROJECT_DIR}/artifacts/tokenizers/apertus-greek-v1 \
-  --output-dir "${SCRATCH}/apertus-greek-tokenizer-distill-freeweb-${VERSION}" \
+  --output-dir "${SCRATCH}/apertus-greek-tokenizer-distill-unified-${VERSION}" \
   --init-strategy retok-distill \
   --torch-dtype bfloat16 \
+  --attn-implementation sdpa \
   --trust-remote-code \
   --distill-steps 500 \
   --distill-lr 1e-5 \
@@ -52,7 +55,10 @@ echo "========================================="
   --distill-batch-size 16 \
   --distill-reg-weight 0.1 \
   --distill-stream-timeout 600 \
+  --distill-sync-interval 10 \
+  --distill-checkpoint-interval 100 \
   --fineweb2-cache-dir "${SCRATCH}/FineWeb2-HQ" \
+  --require-xielu \
   2>&1 | tee "${LOG_DIR}/distill_v18_${SLURM_JOB_ID}_console.log"
 
 echo "========================================="

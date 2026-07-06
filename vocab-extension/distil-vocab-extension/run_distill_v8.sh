@@ -11,26 +11,34 @@ PROJECT_DIR="/users/p-skarvelis/glossApi-Tokenizer"
 cd "${PROJECT_DIR}"
 
 echo "========================================="
-echo " Token Distillation v8 (multi-GPU) — $(date)"
-echo " Approach: Pre-compute + stochastic + multi-layer (parallel)"
-echo " GPU: 4, Samples: 5000, Steps: 2000, Batch: 64"
-echo " Layers: [4,8,16] weights=[0.2,0.5,0.3]"
-echo " Resume: YES (every 50 steps)"
+echo " Unified Token Distillation (single-node, 4 GPU) — $(date)"
+echo " Strategy: retok-distill with context sampling and row sync"
+echo " GPU: 4, Samples: 5000, Steps: 500, Batch: 16"
 echo "========================================="
 
-# --distill-steps 2000 should be plenty (the good tokens converge by step ~990)
-
-./run_uenv.sh python -u ${PROJECT_DIR}/vocab-extension/distil-vocab-extension/advanced_token_init.py \
+./run_uenv.sh python -u -m torch.distributed.run --standalone --nproc_per_node=4 \
+  ${PROJECT_DIR}/vocab-extension/distil-vocab-extension/unified_token_distill.py \
   --token-file ${PROJECT_DIR}/artifacts/vocab_candidates/selected_tokens_v1.txt \
+  --base-tokenizer ${PROJECT_DIR}/artifacts/tokenizers/apertus-base \
   --base-model swiss-ai/Apertus-8B-Instruct-2509 \
   --extended-tokenizer ${PROJECT_DIR}/artifacts/tokenizers/apertus-greek-v1 \
-  --output-dir "${SCRATCH}/apertus-greek-tokenizer-distill" \
+  --output-dir "${SCRATCH}/apertus-greek-tokenizer-distill-unified-v8" \
   --init-strategy retok-distill \
   --torch-dtype bfloat16 \
+  --attn-implementation sdpa \
   --trust-remote-code \
-  --distill-steps 2000 \
-  --distill-lr 1e-3 \
+  --distill-steps 500 \
+  --distill-lr 1e-5 \
   --distill-samples 5000 \
+  --distill-contexts-per-token 8 \
+  --distill-max-seq-length 1024 \
+  --distill-warmup-steps 50 \
+  --distill-batch-size 16 \
+  --distill-reg-weight 0.1 \
+  --distill-stream-timeout 600 \
+  --distill-sync-interval 10 \
+  --distill-checkpoint-interval 100 \
+  --require-xielu \
   2>&1
 
 echo "========================================="

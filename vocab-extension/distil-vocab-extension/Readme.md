@@ -1,15 +1,99 @@
-cd /users/${USER}/glossApi-Tokenizer/
+# Unified Distillation Pipeline
 
-rm -rf "${SCRATCH}/apertus-greek-tokenizer-distill" && sbatch ./vocab-extension/distil-vocab-extension/run_distill_v8.sh
+This folder had scripts for token initialization and
+distillation. The entrypoint is:
 
-to resume just sbatch ./vocab-extension/distil-vocab-extension/run_distill_v8.sh
+- `vocab-extension/distil-vocab-extension/unified_token_distill.py`
 
-* always use --no-use-chat-template for evaluation of MMLU
+It has three strategies for CLI with:
 
-./run_uenv.sh python evaluation/evaluate_greek_mmlu.py \
+- `--init-strategy weighted-mean`
+- `--init-strategy retok`
+- `--init-strategy retok-distill`
+
+`retok-distill` supports distributed runs through `torchrun` across all GPUs and
+multiple Alps/Clariden nodes.
+
+The script enforces xIELU CUDA by default (`--require-xielu`).
+
+
+## Single-Node Example (uenv)
+
+```bash
+cd /users/${USER}/glossApi-Tokenizer
+
+./run_uenv.sh python -m torch.distributed.run \
+  --standalone \
+  --nproc_per_node=4 \
+  vocab-extension/distil-vocab-extension/unified_token_distill.py \
+  --token-file artifacts/vocab_candidates/selected_tokens_v1.txt \
+  --base-tokenizer artifacts/tokenizers/apertus-base \
   --base-model swiss-ai/Apertus-8B-Instruct-2509 \
-  --trained-model "${SCRATCH}/apertus-greek-tokenizer-distill" \
-  --output-json artifacts/reports/greek_mmlu_distill_eval.json \
-  --no-use-chat-template
+  --extended-tokenizer artifacts/tokenizers/apertus-greek-v1 \
+  --output-dir "${SCRATCH}/apertus-greek-tokenizer-distill-unified" \
+  --init-strategy retok-distill \
+  --torch-dtype bfloat16 \
+  --attn-implementation sdpa \
+  --distill-steps 500 \
+  --distill-lr 5e-6 \
+  --distill-samples 5000 \
+  --distill-contexts-per-token 8 \
+  --distill-max-seq-length 1024 \
+  --distill-warmup-steps 50 \
+  --distill-batch-size 16 \
+  --distill-reg-weight 0.1 \
+  --distill-stream-timeout 600 \
+  --distill-sync-interval 10 \
+  --distill-sync-start-step 50 \
+  --distill-checkpoint-interval 100 \
+  --distill-max-invalid-steps 20 \
+  --distill-lr-decay-on-invalid 0.5 \
+  --report-path artifacts/reports/unified_token_distill_report.json \
+  --require-xielu
+```
 
-rm -rf "${SCRATCH}/apertus-greek-tokenizer-distill-freeweb-v18" && sbatch ./vocab-extension/distil-vocab-extension/run_distill_freeweb.sh
+
+## Multi-Node Clariden Example
+
+Use the dedicated launcher:
+
+- `scripts/run_apertus_tokenizer_distill_clariden_multinode.sh`
+
+```bash
+cd /users/${USER}/glossApi-Tokenizer
+
+# Optional overrides
+export OUTPUT_DIR="/capstor/scratch/cscs/${USER}/apertus-greek-tokenizer-distill-unified"
+export DISTILL_STEPS=500
+export DISTILL_LR=5e-6
+export NPROC_PER_NODE=4
+export DIST_TIMEOUT_SECONDS=7200
+export DISTILL_SYNC_START_STEP=50
+export DISTILL_MAX_INVALID_STEPS=20
+export DISTILL_LR_DECAY_ON_INVALID=0.5
+
+sbatch scripts/run_apertus_tokenizer_distill_clariden_multinode.sh
+```
+
+Notes:
+
+- `OUTPUT_DIR` must be on a shared filesystem visible to all nodes.
+- The launcher verifies xIELU before starting distributed training.
+- Context caching is reused automatically unless `REFRESH_CONTEXT_CACHE=1`.
+- If `OUTPUT_DIR` already has distill checkpoints, the run resumes. For a clean restart set `OVERWRITE_OUTPUT_DIR=1`.
+
+
+## Optional GreekMMLU Gate
+
+You can evaluate after distillation and fail the run if it is below base:
+
+```bash
+export RUN_GREEK_MMLU_EVAL=1
+export FAIL_BELOW_BASE=1
+export USE_CHAT_TEMPLATE=0
+export DIST_TIMEOUT_SECONDS=7200
+export DISTILL_SYNC_START_STEP=50
+export DISTILL_MAX_INVALID_STEPS=20
+export DISTILL_LR_DECAY_ON_INVALID=0.5
+sbatch scripts/run_apertus_tokenizer_distill_clariden_multinode.sh
+```
