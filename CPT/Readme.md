@@ -42,9 +42,10 @@ Useful options:
 - `--smoke-test`: short validation run
 - `--skip-warmup`: skip the embedding-only phase
 - `--attn-implementation sdpa`: default backend that works without extra attention kernels
-- streaming text is tokenized with `padding="max_length"` so distributed smoke runs do not fail on variable-length iterable batches
-- smoke mode defaults to `per_device_train_batch_size=1`, `gradient_accumulation_steps=1`, and `smoke_max_seq_length=1024` so the first Clariden validation run stays well below the full 2048-token production footprint
-- `--expected-world-size 4 --require-distributed`: fail fast if the launch shape is wrong
+- **Sequence packing is active by default in streaming mode.** Documents are concatenated with ``<eos>`` separators and chunked into fixed-length ``max_seq_length`` sequences with per-document position IDs that reset at each document boundary. This eliminates wasted compute on padding tokens (previously up to ~67% waste for short documents).
+- Prepared datasets (``--prepared-train-dataset-dir``) are also packed; ``scripts/prepare_cpt_dataset.py`` now stores ``position_ids`` alongside ``input_ids`` in every parquet shard.
+- smoke mode defaults to ``per_device_train_batch_size=1``, ``gradient_accumulation_steps=1``, and ``smoke_max_seq_length=1024`` so the first Clariden validation run stays well below the full 2048-token production footprint
+- ``--expected-world-size 4 --require-distributed``: fail fast if the launch shape is wrong
 
 Inspect the full CLI with:
 

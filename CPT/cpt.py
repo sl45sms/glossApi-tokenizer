@@ -199,7 +199,7 @@ def parse_args() -> argparse.Namespace:
         "--tokenize-batch-size",
         type=int,
         default=1000,
-        help="Batch size used by the streaming tokenization map.",
+        help="Batch size used by the streaming tokenization map (legacy path; ignored when packing is active).",
     )
     parser.add_argument(
         "--max-seq-length",
@@ -296,6 +296,18 @@ def parse_args() -> argparse.Namespace:
         default=1000,
         help="Warmup steps for the full CPT cosine schedule.",
     )
+    parser.add_argument(
+        "--full-embedding-lr-scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Scale factor applied to the embedding learning rate during the full phase. "
+            "When > 1.0, the input and output embeddings receive a higher LR than the "
+            "transformer core (e.g. 5.0 means embeddings train at 5× the base LR). "
+            "This compensates for the randomly-initialised new Greek tokens without "
+            "destabilising the pre-trained core. Set to 1.0 to disable."
+        ),
+    )
 
     parser.add_argument(
         "--smoke-test",
@@ -364,7 +376,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--smoke-full-warmup-steps cannot be negative.")
     if args.full_warmup_steps < 0:
         raise SystemExit("--full-warmup-steps cannot be negative.")
-
+    if args.full_embedding_lr_scale <= 0:
+        raise SystemExit("--full-embedding-lr-scale must be positive.")
     if args.greek_probability < 0 or args.english_probability < 0:
         raise SystemExit("Dataset sampling probabilities cannot be negative.")
     if args.greek_probability == 0 and args.english_probability == 0:
@@ -432,12 +445,122 @@ def has_text(example: Dict[str, Any], text_column: str) -> bool:
     return isinstance(text, str) and bool(text.strip())
 
 
+def compute_position_ids_from_packed(token_ids: Sequence[int], eos_token_id: int) -> list[int]:
+    """Compute position IDs for a packed sequence, resetting at each EOS (document boundary).
+
+    Within a packed sequence, documents are separated by ``eos_token_id``.
+    Position IDs start at 0 for the first token of each document and increment
+    by 1 for each subsequent token, resetting to 0 after every EOS marker.
+
+    This prevents the model from confusing positional information across
+    unrelated documents that happen to share a packed sequence.
+    """
+    position_ids: list[int] = []
+    current_pos = 0
+    for tid in token_ids:
+        position_ids.append(current_pos)
+        current_pos += 1
+        if tid == eos_token_id:
+            current_pos = 0
+    return position_ids
+
+
+class PackedIterableDataset(torch.utils.data.IterableDataset):
+    """Streaming IterableDataset that packs documents into fixed-length sequences.
+
+    Documents are read from a (possibly interleaved) streaming HuggingFace dataset,
+    tokenized on the fly, concatenated with ``<eos>`` separators, and yielded as
+    fixed-length ``max_seq_length`` chunks.  Each chunk carries pre-computed
+    ``position_ids`` that reset at document boundaries so the model does not
+    confuse unrelated packed documents.
+
+    Sharding uses the native HuggingFace ``Dataset.shard()`` method so each
+    (rank, worker) pair downloads **only** its own file-level shard from the Hub
+    rather than downloading 100 % of the data and discarding the rest.
+
+    .. attention::
+       This dataset implements **naive packing**: documents within a chunk can
+       attend to each other via causal attention.  For continued pretraining this
+       is a deliberate and well-established trade-off — the model quickly learns
+       that ``<eos>`` tokens act as semantic boundaries, and the per-document
+       ``position_ids`` keep RoPE encodings from bleeding across unrelated texts.
+       True block-diagonal attention (4-D mask / ``cu_seqlens``) would be needed
+       only for strict mathematical isolation (e.g. instruction tuning).
+    """
+
+    def __init__(
+        self,
+        dataset,
+        tokenizer,
+        max_seq_length: int,
+        text_column: str,
+        rank: int,
+        world_size: int,
+    ):
+        self.dataset = dataset
+        self.tokenizer = tokenizer
+        self.max_seq_length = max_seq_length
+        self.text_column = text_column
+        self.rank = rank
+        self.world_size = world_size
+        self.eos_token_id: int = tokenizer.eos_token_id
+
+    def __iter__(self):
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            worker_id = worker_info.id
+            num_workers = worker_info.num_workers
+        else:
+            worker_id = 0
+            num_workers = 1
+
+        total_shards = self.world_size * num_workers
+        shard_idx = self.rank * num_workers + worker_id
+
+        # Use HuggingFace native file-level sharding so each (rank, worker)
+        # pair downloads *only* its own subset from the Hub instead of
+        # downloading 100 % of the data and discarding the rest.
+        sharded_dataset = self.dataset
+        if total_shards > 1:
+            sharded_dataset = self.dataset.shard(num_shards=total_shards, index=shard_idx)
+
+        buffer: list[int] = []
+        eos = self.eos_token_id
+        seq_len = self.max_seq_length
+
+        for example in sharded_dataset:
+            text = example.get(self.text_column)
+            if not isinstance(text, str) or not text.strip():
+                continue
+
+            token_ids = self.tokenizer.encode(text, add_special_tokens=False)
+            if not token_ids:
+                continue
+            token_ids.append(eos)
+            buffer.extend(token_ids)
+
+            while len(buffer) >= seq_len:
+                chunk = buffer[:seq_len]
+                buffer = buffer[seq_len:]
+                position_ids = compute_position_ids_from_packed(chunk, eos)
+                yield {
+                    "input_ids": chunk,
+                    "position_ids": position_ids,
+                }
+
+
 def tokenize_batch(
     examples: Dict[str, Sequence[Any]],
     tokenizer,
     text_column: str,
     max_seq_length: int,
 ) -> Dict[str, Any]:
+    """Legacy per-example tokenization with padding – kept for reference only.
+
+    Prefer :class:`PackedIterableDataset` for the streaming CPT path;
+    it avoids wasting compute on pad tokens and yields packed sequences
+    with per-document position IDs.
+    """
     return tokenizer(
         list(examples[text_column]),
         truncation=True,
@@ -491,10 +614,15 @@ def load_prepared_training_dataset(args: argparse.Namespace):
                 "Prepared dataset sequence length mismatch: "
                 f"metadata.json says {prepared_seq_length}, but the current run expects {effective_seq_length}."
             )
-
-    rank_zero_print(
-        f"Loading prepared training dataset from {prepared_dir} with {len(shard_paths)} parquet shard(s)."
-    )
+        has_position_ids = metadata.get("position_ids_included", False)
+        rank_zero_print(
+            f"Loading prepared training dataset from {prepared_dir} with {len(shard_paths)} parquet shard(s)"
+            f" (position_ids_included={has_position_ids})."
+        )
+    else:
+        rank_zero_print(
+            f"Loading prepared training dataset from {prepared_dir} with {len(shard_paths)} parquet shard(s)."
+        )
     return load_dataset(
         "parquet",
         data_files=[str(path) for path in shard_paths],
@@ -533,42 +661,73 @@ def build_training_dataset(args: argparse.Namespace, tokenizer):
         )
 
     filtered_ds = combined_ds.filter(partial(has_text, text_column=args.text_column))
-    map_kwargs: Dict[str, Any] = {
-        "function": partial(
-            tokenize_batch,
-            tokenizer=tokenizer,
-            text_column=args.text_column,
-            max_seq_length=effective_max_seq_length(args),
-        ),
-        "batched": True,
-        "batch_size": args.tokenize_batch_size,
-    }
-    if getattr(filtered_ds, "features", None):
-        map_kwargs["remove_columns"] = list(filtered_ds.features.keys())
-    return filtered_ds.map(**map_kwargs)
+
+    packed_dataset = PackedIterableDataset(
+        dataset=filtered_ds,
+        tokenizer=tokenizer,
+        max_seq_length=effective_max_seq_length(args),
+        text_column=args.text_column,
+        rank=global_rank(),
+        world_size=world_size(),
+    )
+    return packed_dataset
 
 
 def causal_lm_data_collator(features: Sequence[Dict[str, Any]], tokenizer=None) -> Dict[str, torch.Tensor]:
-    input_ids = torch.tensor([feature["input_ids"] for feature in features], dtype=torch.long)
-    labels = input_ids.clone()
-    
-    # Ignore pad tokens in loss computation by masking them with -100
-    if tokenizer is not None and tokenizer.pad_token_id is not None:
-        labels[labels == tokenizer.pad_token_id] = -100
+    """Collate packed (or legacy padded) sequences into a training batch.
 
-    batch = {
-        "input_ids": input_ids,
-        "labels": labels,
-    }
+    Expected per-feature keys:
+
+    * ``input_ids`` – required
+    * ``position_ids`` – optional; if missing, computed on the fly by scanning
+      for ``tokenizer.eos_token_id``.  When present (e.g. from
+      :class:`PackedIterableDataset`) the values are used as-is.
+    * ``attention_mask`` – optional; if missing, defaults to all-ones (packed
+      sequences have no internal padding).
+    * ``labels`` – optional; if missing, cloned from ``input_ids``.
+    """
+    input_ids = torch.tensor([feature["input_ids"] for feature in features], dtype=torch.long)
+
+    if "labels" in features[0]:
+        labels = torch.tensor([feature["labels"] for feature in features], dtype=torch.long)
+    else:
+        labels = input_ids.clone()
+        # Mask pad tokens if present (legacy padded-path safety; packed sequences have none).
+        if tokenizer is not None and tokenizer.pad_token_id is not None:
+            labels[labels == tokenizer.pad_token_id] = -100
+
+    if "position_ids" in features[0]:
+        position_ids = torch.tensor([feature["position_ids"] for feature in features], dtype=torch.long)
+    elif tokenizer is not None and tokenizer.eos_token_id is not None:
+        # Compute position IDs on the fly for prepared datasets that only
+        # store input_ids (or for any other path that omits them).
+        position_ids = torch.zeros_like(input_ids)
+        for b in range(input_ids.size(0)):
+            current_pos = 0
+            for t in range(input_ids.size(1)):
+                position_ids[b, t] = current_pos
+                current_pos += 1
+                if input_ids[b, t].item() == tokenizer.eos_token_id:
+                    current_pos = 0
+    else:
+        # Fallback: monotonic positions (no document-boundary resets).
+        position_ids = torch.arange(input_ids.size(1), dtype=torch.long).unsqueeze(0).expand_as(input_ids)
 
     if "attention_mask" in features[0]:
-        batch["attention_mask"] = torch.tensor(
+        attention_mask = torch.tensor(
             [feature["attention_mask"] for feature in features],
             dtype=torch.long,
         )
     else:
-        batch["attention_mask"] = torch.ones_like(input_ids)
+        # Packed sequences have no padding: every position is valid.
+        attention_mask = torch.ones_like(input_ids)
 
+    batch: Dict[str, torch.Tensor] = {
+        "input_ids": input_ids,
+        "labels": labels,
+        "attention_mask": attention_mask,
+        "position_ids": position_ids,
+    }
     return batch
 
 
@@ -808,6 +967,96 @@ def save_phase_metrics(
     )
 
 
+def _load_checkpoint_weights_into_model(model, checkpoint_path: str | Path) -> None:
+    """Load a saved Trainer checkpoint's weights into an existing model.
+
+    Uses ``AutoModelForCausalLM.from_pretrained`` to read the checkpoint
+    (supporting both safetensors and pytorch formats) and then copies the
+    state dict into *model* so the caller retains the same Python object.
+    """
+    checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.is_dir():
+        raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_path}")
+
+    # Determine the torch dtype from the existing model so the reloaded
+    # checkpoint matches.
+    existing_dtype = next(model.parameters()).dtype
+    dtype_name = str(existing_dtype).replace("torch.", "")
+
+    ref_model = AutoModelForCausalLM.from_pretrained(
+        str(checkpoint_path),
+        trust_remote_code=getattr(model.config, "trust_remote_code", False),
+        torch_dtype=existing_dtype,
+    )
+    model.load_state_dict(ref_model.state_dict(), strict=True)
+    del ref_model
+
+
+def _build_embedding_scaled_optimizer(
+    model, base_lr: float, embedding_lr_scale: float, training_args: TrainingArguments
+):
+    """Build an AdamW optimizer with separate LR for embeddings vs transformer core.
+
+    When *embedding_lr_scale* > 1.0 the input and output embedding rows are
+    placed in a parameter group with ``lr = base_lr * embedding_lr_scale``
+    and zero weight decay.  All other parameters use *base_lr* and the
+    standard weight decay from *training_args*.
+
+    Returns an ``(optimizer, None)`` tuple suitable for passing to
+    :class:`transformers.Trainer` via the ``optimizers`` argument.
+    """
+    # Identify embedding parameters by their tensor id.
+    input_embeds = model.get_input_embeddings()
+    output_embeds = model.get_output_embeddings()
+    embed_ids: set[int] = set()
+    if input_embeds is not None:
+        embed_ids.update(id(p) for p in input_embeds.parameters())
+    if output_embeds is not None:
+        embed_ids.update(id(p) for p in output_embeds.parameters())
+
+    # Separate decay / no-decay parameter names (standard HF logic).
+    decay_params: set[str] = set()
+    no_decay_params: set[str] = set()
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if p.ndim < 2 or "bias" in n or "layernorm" in n.lower() or "layer_norm" in n.lower():
+            no_decay_params.add(n)
+        else:
+            decay_params.add(n)
+
+    optimizer_grouped_parameters = [
+        {
+            "params": [
+                p for n, p in model.named_parameters()
+                if id(p) in embed_ids and p.requires_grad
+            ],
+            "lr": base_lr * embedding_lr_scale,
+            "weight_decay": 0.0,
+        },
+        {
+            "params": [
+                p for n, p in model.named_parameters()
+                if id(p) not in embed_ids and p.requires_grad and n in decay_params
+            ],
+            "lr": base_lr,
+            "weight_decay": training_args.weight_decay,
+        },
+        {
+            "params": [
+                p for n, p in model.named_parameters()
+                if id(p) not in embed_ids and p.requires_grad and n in no_decay_params
+            ],
+            "lr": base_lr,
+            "weight_decay": 0.0,
+        },
+    ]
+
+    optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(training_args)
+    optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
+    return (optimizer, None)
+
+
 def run_phase(
     args: argparse.Namespace,
     phase_name: str,
@@ -817,6 +1066,7 @@ def run_phase(
     max_steps: int,
     learning_rate: float,
     warmup_steps: int,
+    embedding_lr_scale: float = 1.0,
 ) -> Trainer | None:
     if max_steps <= 0:
         rank_zero_print(f"Skipping phase '{phase_name}' because max_steps={max_steps}.")
@@ -830,19 +1080,36 @@ def run_phase(
     else:
         ensure_output_dir(phase_output_dir)
 
-    trainer = Trainer(
-        model=model,
-        args=training_arguments(
-            args,
-            phase_name=phase_name,
-            phase_output_dir=phase_output_dir,
-            max_steps=max_steps,
-            learning_rate=learning_rate,
-            warmup_steps=warmup_steps,
-        ),
-        train_dataset=train_dataset,
-        data_collator=partial(causal_lm_data_collator, tokenizer=tokenizer),
+    training_args = training_arguments(
+        args,
+        phase_name=phase_name,
+        phase_output_dir=phase_output_dir,
+        max_steps=max_steps,
+        learning_rate=learning_rate,
+        warmup_steps=warmup_steps,
     )
+
+    trainer_kwargs: Dict[str, Any] = {
+        "model": model,
+        "args": training_args,
+        "train_dataset": train_dataset,
+        "data_collator": partial(causal_lm_data_collator, tokenizer=tokenizer),
+    }
+
+    if embedding_lr_scale != 1.0:
+        rank_zero_print(
+            f"Embedding LR scale active for phase '{phase_name}': "
+            f"embeddings={learning_rate * embedding_lr_scale:.2e}, "
+            f"core={learning_rate:.2e}."
+        )
+        trainer_kwargs["optimizers"] = _build_embedding_scaled_optimizer(
+            model,
+            base_lr=learning_rate,
+            embedding_lr_scale=embedding_lr_scale,
+            training_args=training_args,
+        )
+
+    trainer = Trainer(**trainer_kwargs)
 
     resume_checkpoint = None
     resume_global_step = 0
@@ -852,7 +1119,11 @@ def run_phase(
 
     if resume_global_step >= max_steps:
         if resume_checkpoint:
-            trainer._load_from_checkpoint(resume_checkpoint)
+            # Reload the completed checkpoint weights into the in-memory model
+            # via the public API instead of relying on the private Trainer
+            # helper `_load_from_checkpoint`, which may not correctly update
+            # the model's parameters in all transformers versions.
+            _load_checkpoint_weights_into_model(model, resume_checkpoint)
         rank_zero_print(
             f"Skipping phase '{phase_name}' because checkpoint {resume_checkpoint} already reached step {resume_global_step}."
         )
@@ -896,6 +1167,7 @@ def save_run_config(args: argparse.Namespace, current_world_size: int, tokenizer
     payload = {
         "args": vars(args),
         "train_dataset_mode": train_dataset_mode(args),
+        "packing": not args.prepared_train_dataset_dir,
         "world_size": current_world_size,
         "effective_global_batch_size": effective_global_batch,
         "effective_batch_settings": batch_settings,
@@ -971,9 +1243,11 @@ def main() -> None:
 
     batch_settings = effective_batch_settings(args)
     effective_global_batch = effective_global_batch_size(args, current_world_size)
+    packing_active = not args.prepared_train_dataset_dir  # streaming path uses packing; prepared path may also be packed
     rank_zero_print(
         "Loaded aligned checkpoint successfully. "
         f"train_dataset_mode={train_dataset_mode(args)}, "
+        f"packing={'on' if packing_active else 'from-disk'}, "
         f"world_size={current_world_size}, effective_global_batch_size={effective_global_batch}, "
         f"per_device_train_batch_size={batch_settings['per_device_train_batch_size']}, "
         f"gradient_accumulation_steps={batch_settings['gradient_accumulation_steps']}, "
@@ -1009,6 +1283,7 @@ def main() -> None:
         max_steps=int(plan["full"]["max_steps"]),
         learning_rate=float(plan["full"]["learning_rate"]),
         warmup_steps=int(plan["full"]["warmup_steps"]),
+        embedding_lr_scale=args.full_embedding_lr_scale,
     )
     if full_phase_trainer is not None:
         trainer = full_phase_trainer
