@@ -12,6 +12,7 @@ The retok-distill path is designed for Alps/Clariden distributed launches via
 """
 
 import argparse
+import copy
 import gc
 import json
 import os
@@ -58,6 +59,42 @@ def parse_args() -> argparse.Namespace:
         choices=("weighted-mean", "retok", "retok-distill"),
         default="retok-distill",
         help="Embedding initialization strategy.",
+    )
+    parser.add_argument(
+        "--max-trainable-tokens",
+        type=int,
+        default=1500,
+        help=(
+            "Maximum number of new tokens to activate in this stage. "
+            "Use 0 to disable the cap and activate all candidates at once."
+        ),
+    )
+    parser.add_argument(
+        "--deferred-token-file",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path for writing deferred tokens for the next stage. "
+            "Defaults to <output-dir>/deferred_tokens_next_stage.txt."
+        ),
+    )
+    parser.add_argument(
+        "--untied-output-init-strategy",
+        choices=("zero", "mean"),
+        default="zero",
+        help=(
+            "Initialization strategy for new untied lm_head rows. "
+            "Use zero by default to avoid making new output tokens immediately competitive before CPT."
+        ),
+    )
+    parser.add_argument(
+        "--train-untied-output-rows",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Train new untied lm_head rows during tokenizer distillation. Disabled by default so distill focuses on "
+            "input embeddings and leaves output-head adaptation to CPT."
+        ),
     )
     parser.add_argument(
         "--torch-dtype",
@@ -240,6 +277,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit(f"Token file not found: {args.token_file}")
     if args.distill_steps <= 0:
         raise SystemExit("--distill-steps must be positive.")
+    if args.max_trainable_tokens < 0:
+        raise SystemExit("--max-trainable-tokens cannot be negative.")
+    if args.train_untied_output_rows and args.untied_output_init_strategy == "zero":
+        rank_zero_print(
+            "Training untied output rows with zero initialization. This is allowed, but expect CPT to carry most of the recovery."
+        )
     if args.distill_batch_size <= 0:
         raise SystemExit("--distill-batch-size must be positive.")
     if args.distill_samples <= 0:
@@ -326,6 +369,49 @@ def filter_trainable_tokens(base_tokenizer, extended_tokenizer, tokens: Sequence
         source_map[token] = source_ids
 
     return trainable, skipped, source_map
+
+
+def cap_trainable_tokens(
+    trainable_tokens: Sequence[str],
+    source_map: Dict[str, List[int]],
+    max_trainable_tokens: int,
+) -> Tuple[List[str], List[str], Dict[str, List[int]]]:
+    if max_trainable_tokens == 0 or len(trainable_tokens) <= max_trainable_tokens:
+        return list(trainable_tokens), [], dict(source_map)
+
+    selected = list(trainable_tokens[:max_trainable_tokens])
+    deferred = list(trainable_tokens[max_trainable_tokens:])
+    selected_set = set(selected)
+    selected_map = {token: source_map[token] for token in selected if token in selected_set}
+    return selected, deferred, selected_map
+
+
+def build_stage_tokenizer(base_tokenizer, stage_tokens: Sequence[str]):
+    stage_tokenizer = copy.deepcopy(base_tokenizer)
+    added = stage_tokenizer.add_tokens(list(stage_tokens))
+    return stage_tokenizer, added
+
+
+def write_deferred_tokens_file(args: argparse.Namespace, deferred_tokens: Sequence[str]) -> Optional[Path]:
+    target_path = args.deferred_token_file or (args.output_dir / "deferred_tokens_next_stage.txt")
+    if deferred_tokens:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text("\n".join(deferred_tokens) + "\n", encoding="utf-8")
+        return target_path
+
+    if target_path.exists():
+        target_path.unlink()
+    return None
+
+
+def serialize_args(args: argparse.Namespace) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    for key, value in vars(args).items():
+        if isinstance(value, Path):
+            payload[key] = str(value)
+        else:
+            payload[key] = value
+    return payload
 
 
 
@@ -668,12 +754,13 @@ def run_distillation(
     tied = bool(output_embeddings is not None and output_embeddings.data_ptr() == input_embeddings.data_ptr())
     if tied:
         output_embeddings = None
+    train_untied_output_rows = bool(output_embeddings is not None and args.train_untied_output_rows)
 
     for param in model.parameters():
         param.requires_grad = False
     input_embeddings.requires_grad = True
     if output_embeddings is not None:
-        output_embeddings.requires_grad = True
+        output_embeddings.requires_grad = train_untied_output_rows
 
     if hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
@@ -701,7 +788,7 @@ def run_distillation(
     w_in_init = input_embeddings.index_select(0, new_ids_tensor).detach().clone()
 
     params = [input_embeddings]
-    if output_embeddings is not None:
+    if train_untied_output_rows and output_embeddings is not None:
         params.append(output_embeddings)
 
     optimizer = torch.optim.AdamW(params, lr=args.distill_lr, weight_decay=1e-4)
@@ -954,6 +1041,7 @@ def run_distillation(
         "num_contexts": len(contexts),
         "local_contexts": len(local_texts),
         "num_new_token_ids": len(new_ids_set),
+        "train_untied_output_rows": train_untied_output_rows,
         "recoveries": recoveries,
         "invalid_steps": invalid_steps,
     }
@@ -994,7 +1082,10 @@ def initialize_embeddings(
 
             input_embeddings[token_id].copy_(emb)
             if output_embeddings is not None and not tied:
-                output_embeddings[token_id].copy_(emb)
+                if args.untied_output_init_strategy == "mean":
+                    output_embeddings[token_id].copy_(emb)
+                else:
+                    output_embeddings[token_id].zero_()
             initialized += 1
 
     return {
@@ -1002,13 +1093,12 @@ def initialize_embeddings(
         "skipped": skipped,
         "strategy": args.init_strategy,
         "output_embeddings_tied": tied,
+        "untied_output_init_strategy": args.untied_output_init_strategy if not tied else "tied",
     }
 
 
 
-def load_model_and_tokenizer(args: argparse.Namespace):
-    tokenizer = load_repo_tokenizer(args.extended_tokenizer, trust_remote_code=args.trust_remote_code)
-
+def load_model_for_tokenizer(args: argparse.Namespace, tokenizer):
     model_kwargs: Dict[str, Any] = {
         "trust_remote_code": args.trust_remote_code,
         "dtype": resolve_torch_dtype(args.torch_dtype),
@@ -1018,7 +1108,7 @@ def load_model_and_tokenizer(args: argparse.Namespace):
 
     model = AutoModelForCausalLM.from_pretrained(args.base_model, **model_kwargs)
     model.resize_token_embeddings(len(tokenizer), mean_resizing=False)
-    return model, tokenizer
+    return model
 
 
 
@@ -1042,19 +1132,51 @@ def main() -> None:
             )
         rank_zero_print(xielu_status["xielu_cuda_message"])
 
-        model, tokenizer = load_model_and_tokenizer(args)
-        model = model.to(device)
-
         candidate_tokens = load_candidate_tokens(args.token_file)
 
         base_tokenizer = load_repo_tokenizer(args.base_tokenizer, trust_remote_code=args.trust_remote_code)
-        trainable_tokens, skipped_tokens, source_map = filter_trainable_tokens(
+        reference_extended_tokenizer = load_repo_tokenizer(
+            args.extended_tokenizer,
+            trust_remote_code=args.trust_remote_code,
+        )
+
+        trainable_tokens_all, skipped_tokens, source_map_all = filter_trainable_tokens(
             base_tokenizer,
-            tokenizer,
+            reference_extended_tokenizer,
             candidate_tokens,
         )
-        if not trainable_tokens:
+        if not trainable_tokens_all:
             raise SystemExit("No trainable tokens remained after filtering.")
+
+        trainable_tokens, deferred_tokens, source_map = cap_trainable_tokens(
+            trainable_tokens_all,
+            source_map_all,
+            args.max_trainable_tokens,
+        )
+        if not trainable_tokens:
+            raise SystemExit("No trainable tokens remained after applying --max-trainable-tokens.")
+
+        if deferred_tokens:
+            rank_zero_print(
+                f"Staged run enabled: training {len(trainable_tokens)} tokens now and deferring {len(deferred_tokens)} for next stage."
+            )
+
+        tokenizer, actually_added = build_stage_tokenizer(base_tokenizer, trainable_tokens)
+        if actually_added != len(trainable_tokens):
+            rank_zero_print(
+                "Warning: stage tokenizer added fewer tokens than requested. "
+                f"requested={len(trainable_tokens)} added={actually_added}"
+            )
+
+        deferred_tokens_path: Optional[Path] = None
+        if is_rank_zero():
+            deferred_tokens_path = write_deferred_tokens_file(args, deferred_tokens)
+            if deferred_tokens_path is not None:
+                rank_zero_print(f"Deferred tokens written to {deferred_tokens_path}")
+        maybe_barrier()
+
+        model = load_model_for_tokenizer(args, tokenizer)
+        model = model.to(device)
 
         init_stats = initialize_embeddings(args, model, tokenizer, trainable_tokens, source_map)
         rank_zero_print(
@@ -1090,18 +1212,27 @@ def main() -> None:
                 "extended_tokenizer": args.extended_tokenizer,
                 "token_file": str(args.token_file),
                 "output_dir": str(args.output_dir),
+                "args": serialize_args(args),
                 "num_candidate_tokens": len(candidate_tokens),
                 "num_trainable_tokens": len(trainable_tokens),
+                "num_deferred_tokens": len(deferred_tokens),
                 "num_skipped_tokens": len(skipped_tokens),
+                "deferred_token_file": str(deferred_tokens_path) if deferred_tokens_path is not None else None,
                 "xielu": xielu_status,
                 "distributed": {
                     "world_size": world_size(),
+                },
+                "tokenizer_stage": {
+                    "base_vocab_size": len(base_tokenizer),
+                    "stage_added_tokens": actually_added,
+                    "stage_vocab_size": len(tokenizer),
                 },
                 "initialization": init_stats,
                 "distillation": distill_stats,
                 "evaluation": eval_stats,
                 "samples": {
                     "trainable_tokens": trainable_tokens[:50],
+                    "deferred_tokens": deferred_tokens[:50],
                     "skipped_tokens": skipped_tokens[:50],
                 },
             }
