@@ -163,6 +163,21 @@ def has_text(example: Dict[str, Any], text_column: str) -> bool:
     return isinstance(text, str) and bool(text.strip())
 
 
+def compute_position_ids(token_ids: Sequence[int], eos_token_id: int) -> list[int]:
+    """Compute position IDs that reset at each EOS (document boundary).
+
+    See :func:`CPT.cpt.compute_position_ids_from_packed` for rationale.
+    """
+    position_ids: list[int] = []
+    current_pos = 0
+    for tid in token_ids:
+        position_ids.append(current_pos)
+        current_pos += 1
+        if tid == eos_token_id:
+            current_pos = 0
+    return position_ids
+
+
 def select_text_and_source(example: Dict[str, Any], text_column: str, source_name: str) -> Dict[str, Any]:
     return {
         text_column: example[text_column],
@@ -235,9 +250,12 @@ def load_tokenizer(tokenizer_path: str, trust_remote_code: bool):
     return tokenizer
 
 
-def write_shard(output_dir: Path, shard_index: int, sequences: Sequence[Sequence[int]]) -> str:
+def write_shard(output_dir: Path, shard_index: int, sequences: Sequence[Sequence[int]], position_ids_sequences: Sequence[Sequence[int]]) -> str:
     shard_path = output_dir / f"train-{shard_index:05d}.parquet"
-    dataset = Dataset.from_dict({"input_ids": list(sequences)})
+    dataset = Dataset.from_dict({
+        "input_ids": list(sequences),
+        "position_ids": list(position_ids_sequences),
+    })
     dataset.to_parquet(str(shard_path))
     return shard_path.name
 
@@ -262,12 +280,14 @@ def maybe_flush_shard(
     output_dir: Path,
     shard_index: int,
     shard_sequences: list[list[int]],
+    shard_position_ids: list[list[int]],
     shard_files: list[str],
 ) -> int:
     if not shard_sequences:
         return shard_index
-    shard_files.append(write_shard(output_dir, shard_index, shard_sequences))
+    shard_files.append(write_shard(output_dir, shard_index, shard_sequences, shard_position_ids))
     shard_sequences.clear()
+    shard_position_ids.clear()
     return shard_index + 1
 
 
@@ -325,6 +345,7 @@ def main() -> None:
     token_buffer: list[int] = []
     buffer_offset = 0
     shard_sequences: list[list[int]] = []
+    shard_position_ids: list[list[int]] = []
     shard_files: list[str] = []
     source_example_counts = {"greek": 0, "english": 0}
     source_byte_counts = {"greek": 0, "english": 0}
@@ -359,22 +380,30 @@ def main() -> None:
                 break
 
             sequence = token_buffer[buffer_offset : buffer_offset + args.max_seq_length]
+            pos_ids = compute_position_ids(sequence, eos_token_id)
             shard_sequences.append(sequence)
+            shard_position_ids.append(pos_ids)
             buffer_offset += args.max_seq_length
             total_sequences += 1
 
             if len(shard_sequences) >= args.sequences_per_shard:
-                shard_index = maybe_flush_shard(args.output_dir, shard_index, shard_sequences, shard_files)
+                shard_index = maybe_flush_shard(
+                    args.output_dir, shard_index, shard_sequences, shard_position_ids, shard_files
+                )
 
         if buffer_offset > 0 and buffer_offset >= len(token_buffer) // 2:
             token_buffer = token_buffer[buffer_offset:]
             buffer_offset = 0
 
-    shard_index = maybe_flush_shard(args.output_dir, shard_index, shard_sequences, shard_files)
+    shard_index = maybe_flush_shard(
+        args.output_dir, shard_index, shard_sequences, shard_position_ids, shard_files
+    )
 
     metadata = {
         "tokenizer_path": args.tokenizer_path,
         "sequence_length": args.max_seq_length,
+        "packing": True,
+        "position_ids_included": True,
         "datasets": {
             "greek": {
                 "dataset": args.greek_dataset,
