@@ -32,6 +32,7 @@ cd /users/${USER}/glossApi-Tokenizer
   --extended-tokenizer artifacts/tokenizers/apertus-greek-v1 \
   --output-dir "${SCRATCH}/apertus-greek-tokenizer-distill-unified" \
   --init-strategy retok-distill \
+  --max-trainable-tokens 1500 \
   --torch-dtype bfloat16 \
   --attn-implementation sdpa \
   --distill-steps 500 \
@@ -66,6 +67,7 @@ cd /users/${USER}/glossApi-Tokenizer
 export OUTPUT_DIR="/capstor/scratch/cscs/${USER}/apertus-greek-tokenizer-distill-unified"
 export DISTILL_STEPS=500
 export DISTILL_LR=5e-6
+export MAX_TRAINABLE_TOKENS=1500
 export NPROC_PER_NODE=4
 export DIST_TIMEOUT_SECONDS=7200
 export DISTILL_SYNC_START_STEP=50
@@ -81,6 +83,23 @@ Notes:
 - The launcher verifies xIELU before starting distributed training.
 - Context caching is reused automatically unless `REFRESH_CONTEXT_CACHE=1`.
 - If `OUTPUT_DIR` already has distill checkpoints, the run resumes. For a clean restart set `OVERWRITE_OUTPUT_DIR=1`.
+- The pipeline is now stage-first by default (`MAX_TRAINABLE_TOKENS=1500`) to avoid a one-shot 5000-token shift.
+- Deferred tokens are written to `OUTPUT_DIR/deferred_tokens_next_stage.txt`.
+
+
+## Stage Continuation (Recommended)
+
+After stage 1 finishes, continue with the deferred token list:
+
+```bash
+export BASE_MODEL="${OUTPUT_DIR}"
+export BASE_TOKENIZER="${OUTPUT_DIR}"
+export TOKEN_FILE="${OUTPUT_DIR}/deferred_tokens_next_stage.txt"
+export OVERWRITE_OUTPUT_DIR=0
+sbatch scripts/run_apertus_tokenizer_distill_clariden_multinode.sh
+```
+
+Repeat until the deferred token file is empty.
 
 
 ## Optional GreekMMLU Gate
