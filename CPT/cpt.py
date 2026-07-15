@@ -173,6 +173,33 @@ def parse_args() -> argparse.Namespace:
         help="Split to use from the English anchor dataset.",
     )
     parser.add_argument(
+        "--eval-dataset",
+        default=None,
+        help="Optional dataset id for the evaluation stream.",
+    )
+    parser.add_argument(
+        "--eval-config",
+        default=None,
+        help="Optional dataset config for the evaluation stream.",
+    )
+    parser.add_argument(
+        "--eval-split",
+        default="validation",
+        help="Split to use from the evaluation dataset.",
+    )
+    parser.add_argument(
+        "--eval-steps",
+        type=int,
+        default=1000,
+        help="Evaluation interval in steps.",
+    )
+    parser.add_argument(
+        "--eval-max-samples",
+        type=int,
+        default=1000,
+        help="Maximum number of samples to evaluate on.",
+    )
+    parser.add_argument(
         "--greek-probability",
         type=float,
         default=0.9,
@@ -673,6 +700,42 @@ def build_training_dataset(args: argparse.Namespace, tokenizer):
     return packed_dataset
 
 
+def build_eval_dataset(args: argparse.Namespace, tokenizer):
+    """Build an evaluation dataset for monitoring perplexity during CPT.
+
+    When no explicit ``--eval-dataset`` is given, this returns ``None`` and
+    evaluation is disabled.  Otherwise a streaming dataset is loaded, filtered,
+    packed into fixed-length sequences, and materialised (truncated or padded
+    to ``--eval-max-samples``).
+    """
+    if not args.eval_dataset:
+        return None
+
+    eval_ds = load_streaming_dataset(args.eval_dataset, args.eval_config, args.eval_split)
+    filtered_ds = eval_ds.filter(partial(has_text, text_column=args.text_column))
+
+    rank_zero_print(f"Building evaluation dataset from {args.eval_dataset} (max_samples={args.eval_max_samples}).")
+
+    packed_eval = PackedIterableDataset(
+        dataset=filtered_ds,
+        tokenizer=tokenizer,
+        max_seq_length=effective_max_seq_length(args),
+        text_column=args.text_column,
+        rank=global_rank(),
+        world_size=world_size(),
+    )
+
+    total = 0
+    samples: list[dict[str, Any]] = []
+    for sample in packed_eval:
+        samples.append(sample)
+        total += 1
+        if total >= args.eval_max_samples:
+            break
+
+    return samples
+
+
 def causal_lm_data_collator(features: Sequence[Dict[str, Any]], tokenizer=None) -> Dict[str, torch.Tensor]:
     """Collate packed (or legacy padded) sequences into a training batch.
 
@@ -885,11 +948,14 @@ def training_arguments(
     max_steps: int,
     learning_rate: float,
     warmup_steps: int,
+    has_eval: bool = False,
 ) -> TrainingArguments:
     logging_steps = max(1, min(args.logging_steps, max_steps))
     save_steps = max(1, min(args.save_steps, max_steps))
+    eval_steps = max(1, min(args.eval_steps, max_steps))
     batch_settings = effective_batch_settings(args)
     save_strategy = "no" if args.benchmark_mode else "steps"
+    eval_strategy = "steps" if (has_eval and not args.benchmark_mode) else "no"
 
     training_kwargs: Dict[str, Any] = {
         "output_dir": str(phase_output_dir),
@@ -905,6 +971,8 @@ def training_arguments(
         "logging_steps": logging_steps,
         "save_strategy": save_strategy,
         "save_steps": save_steps,
+        "eval_strategy": eval_strategy,
+        "eval_steps": eval_steps,
         "lr_scheduler_type": args.lr_scheduler_type,
         "dataloader_num_workers": args.dataloader_num_workers,
         "gradient_checkpointing": args.gradient_checkpointing,
@@ -1067,6 +1135,7 @@ def run_phase(
     learning_rate: float,
     warmup_steps: int,
     embedding_lr_scale: float = 1.0,
+    eval_dataset=None,
 ) -> Trainer | None:
     if max_steps <= 0:
         rank_zero_print(f"Skipping phase '{phase_name}' because max_steps={max_steps}.")
@@ -1087,6 +1156,7 @@ def run_phase(
         max_steps=max_steps,
         learning_rate=learning_rate,
         warmup_steps=warmup_steps,
+        has_eval=eval_dataset is not None,
     )
 
     trainer_kwargs: Dict[str, Any] = {
@@ -1095,6 +1165,8 @@ def run_phase(
         "train_dataset": train_dataset,
         "data_collator": partial(causal_lm_data_collator, tokenizer=tokenizer),
     }
+    if eval_dataset is not None:
+        trainer_kwargs["eval_dataset"] = eval_dataset
 
     if embedding_lr_scale != 1.0:
         rank_zero_print(
@@ -1239,6 +1311,7 @@ def main() -> None:
     validate_aligned_checkpoint(tokenizer, model)
 
     train_dataset = build_training_dataset(args, tokenizer)
+    eval_dataset = build_eval_dataset(args, tokenizer)
     save_run_config(args, current_world_size, len(tokenizer))
 
     batch_settings = effective_batch_settings(args)
@@ -1269,6 +1342,7 @@ def main() -> None:
             max_steps=int(plan["warmup"]["max_steps"]),
             learning_rate=float(plan["warmup"]["learning_rate"]),
             warmup_steps=int(plan["warmup"]["warmup_steps"]),
+            eval_dataset=eval_dataset,
         )
         release_trainer_resources(warmup_trainer)
         del warmup_trainer
@@ -1284,6 +1358,7 @@ def main() -> None:
         learning_rate=float(plan["full"]["learning_rate"]),
         warmup_steps=int(plan["full"]["warmup_steps"]),
         embedding_lr_scale=args.full_embedding_lr_scale,
+        eval_dataset=eval_dataset,
     )
     if full_phase_trainer is not None:
         trainer = full_phase_trainer

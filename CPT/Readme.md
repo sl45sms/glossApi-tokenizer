@@ -41,6 +41,11 @@ Useful options:
 - `--benchmark-mode`: disable checkpoint saves and final export, while still writing phase metrics JSON
 - `--smoke-test`: short validation run
 - `--skip-warmup`: skip the embedding-only phase
+- `--eval-dataset`: optional dataset id for evaluation monitoring (disabled by default; when set, evaluation loss is logged at `--eval-steps` intervals)
+- `--eval-config`: optional dataset config for the evaluation stream (e.g. `ell_Grek`)
+- `--eval-split`: split to use from the evaluation dataset (default: `validation`)
+- `--eval-steps`: evaluation interval in steps (default: `1000`)
+- `--eval-max-samples`: maximum number of packed sequences to materialise for evaluation (default: `1000`)
 - `--attn-implementation sdpa`: default backend that works without extra attention kernels
 - **Sequence packing is active by default in streaming mode.** Documents are concatenated with ``<eos>`` separators and chunked into fixed-length ``max_seq_length`` sequences with per-document position IDs that reset at each document boundary. This eliminates wasted compute on padding tokens (previously up to ~67% waste for short documents).
 - Prepared datasets (``--prepared-train-dataset-dir``) are also packed; ``scripts/prepare_cpt_dataset.py`` now stores ``position_ids`` alongside ``input_ids`` in every parquet shard.
@@ -272,6 +277,11 @@ Useful overrides for the launcher:
 - `ATTN_IMPLEMENTATION=sdpa`
 - `ATTN_IMPLEMENTATION=flash_attention_2`
 - `OVERWRITE_OUTPUT_DIR=1`
+- `EVAL_DATASET=epfml/FineWeb-HQ`
+- `EVAL_CONFIG=ell_Grek`
+- `EVAL_SPLIT=validation`
+- `EVAL_STEPS=500`
+- `EVAL_MAX_SAMPLES=1024`
 - `SKIP_WARMUP=1`
 
 Useful overrides for the multi-node launcher:
@@ -292,6 +302,48 @@ python -m torch.distributed.run --standalone --nproc_per_node=4 CPT/cpt.py ...
 ```
 
 The default attention backend is now `sdpa`, which works without extra attention kernels in the image. Use `ATTN_IMPLEMENTATION=flash_attention_2` only when the container actually includes `flash-attn`.
+
+## Evaluation dataset
+
+CPT now supports an optional held-out evaluation dataset for monitoring training loss. When
+`--eval-dataset` is provided, the script materialises up to `--eval-max-samples` packed
+sequences from the specified dataset and evaluates them at `--eval-steps` intervals.
+
+This is useful for:
+
+- detecting catastrophic forgetting on English text while adapting to Greek
+- monitoring convergence on a Greek validation slice
+- comparing training vs evaluation loss trends without a separate evaluation job
+
+The evaluation dataset is loaded with the same streaming, filtering, and packing logic as
+the training dataset, but the packed sequences are materialised once in memory for fast
+repeated evaluation.
+
+Example – evaluate on an English validation slice every 500 steps:
+
+```bash
+python -m torch.distributed.run --nproc_per_node=4 CPT/cpt.py \
+    --model-path "${SCRATCH}/apertus-greek-tokenizer-v1" \
+    --output-dir /capstor/scratch/cscs/${USER}/apertus-greek-cpt \
+    --eval-dataset epfml/FineWeb-HQ \
+    --eval-split validation \
+    --eval-steps 500 \
+    --eval-max-samples 1024
+```
+
+Or, using the tracked Slurm launcher with environment variables:
+
+```bash
+export EVAL_DATASET=epfml/FineWeb-HQ
+export EVAL_SPLIT=validation
+export EVAL_STEPS=500
+export EVAL_MAX_SAMPLES=1024
+sbatch --time=12:00:00 scripts/run_apertus_greek_cpt_clariden.sh
+```
+
+If no `--eval-dataset` is given, evaluation is completely disabled and the script behaves
+identically to the pre-eval version.
+
 The launcher also pins `HF_HOME`, `HF_DATASETS_CACHE`, and `TRITON_CACHE_DIR` under `/iopsstor/scratch/cscs/${USER}` so active data and compiler caches stay on the fast scratch tier.
 It also sets `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` by default to reduce allocator fragmentation on the first backward pass.
 
