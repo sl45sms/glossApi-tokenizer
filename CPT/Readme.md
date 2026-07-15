@@ -283,6 +283,8 @@ Useful overrides for the launcher:
 - `EVAL_STEPS=500`
 - `EVAL_MAX_SAMPLES=1024`
 - `SKIP_WARMUP=1`
+- `WANDB_PROJECT=apertus-greek-cpt`
+- `WANDB_ENTITY=my-team`
 
 Useful overrides for the multi-node launcher:
 

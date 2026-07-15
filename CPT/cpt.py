@@ -284,8 +284,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--report-to",
-        default="none",
+        default="wandb",
         help="Value passed to Trainer report_to. Use none to disable external reporters.",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        default="apertus-greek-cpt",
+        help="Weights & Biases project name.",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        default=None,
+        help="Weights & Biases entity (username or team name).",
     )
 
     parser.add_argument(
@@ -1304,6 +1314,11 @@ def main() -> None:
     args = parse_args()
     validate_args(args)
     set_seed(args.seed)
+
+    if args.report_to == "wandb":
+        os.environ["WANDB_PROJECT"] = args.wandb_project
+        if args.wandb_entity:
+            os.environ["WANDB_ENTITY"] = args.wandb_entity
 
     current_world_size = validate_runtime(args)
     tokenizer = load_tokenizer(args)
