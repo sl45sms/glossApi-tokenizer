@@ -54,8 +54,8 @@ def _detect_xielu_cuda() -> Dict[str, Any]:
 	return info
 
 
-DEFAULT_BASE_MODEL = "swiss-ai/Apertus-8B-Instruct-2509"
-DEFAULT_KRIKRI_MODEL = "ilsp/Llama-Krikri-8B-Instruct"
+DEFAULT_BASE_MODEL = "swiss-ai/Apertus-8B-2509"
+DEFAULT_KRIKRI_MODEL = "ilsp/Llama-Krikri-8B-Base"
 DEFAULT_MAISTROS_MODEL = "IMISLab/Maistros-8B-Instruct"
 DEFAULT_TRAINED_MODEL = "/capstor/store/cscs/swissai/a0140/p-skarvelis/apertus-greek-cpt/final"
 DEFAULT_DATASET = "dascim/GreekMMLU"
@@ -112,7 +112,7 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument(
 		"--evaluate-maistros",
 		action=argparse.BooleanOptionalAction,
-		default=True,
+		default=False,
 		help="Evaluate the Maistros reference model alongside the base and trained checkpoints.",
 	)
 	parser.add_argument(

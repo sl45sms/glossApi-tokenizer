@@ -55,7 +55,7 @@ Syllable Constraints: Επιβάλλουμε περιορισμούς ώστε �
 
 ```bash
 # 1. Μόνο tokenizer (δεν χρειάζεται GPU)
-./run_uenv.sh python vocab-extension/cga_pipeline.py \
+./run_uenv.sh python vocab-extension/cga-vocab-extension/cga_pipeline.py \
     --base-tokenizer artifacts/tokenizers/apertus-base \
     --token-file artifacts/vocab_candidates/selected_tokens_v1.txt \
     --output-dir artifacts/tokenizers/apertus-greek-cga-v1 \
@@ -64,10 +64,10 @@ Syllable Constraints: Επιβάλλουμε περιορισμούς ώστε �
 # 2. Πλήρες CGA με αρχικοποίηση μοντέλου (χρειάζεται GPU μνήμη)
 #    Το --fasttext-use-subword συνιστάται: δίνει CGA-projected embeddings
 #    ακόμα και για σύνθετες λέξεις που δεν υπάρχουν στο απλό .vec.gz.
-./run_uenv.sh python vocab-extension/cga_pipeline.py \
+./run_uenv.sh python vocab-extension/cga-vocab-extension/cga_pipeline.py \
     --base-tokenizer artifacts/tokenizers/apertus-base \
     --token-file artifacts/vocab_candidates/selected_tokens_v1.txt \
-    --base-model swiss-ai/Apertus-8B-Instruct-2509 \
+    --base-model swiss-ai/Apertus-8B-2509 \
     --output-dir artifacts/tokenizers/apertus-greek-cga-v1 \
     --model-output-dir "${SCRATCH}/apertus-greek-cga-v1" \
     --trust-remote-code --torch-dtype bfloat16 \
@@ -76,10 +76,10 @@ Syllable Constraints: Επιβάλλουμε περιορισμούς ώστε �
     --overwrite
 
 # 3. Με PCA bridge (για πειραματισμό — δες σημείωση παρακάτω)
-./run_uenv.sh python vocab-extension/cga_pipeline.py \
+./run_uenv.sh python vocab-extension/cga-vocab-extension/cga_pipeline.py \
     --base-tokenizer artifacts/tokenizers/apertus-base \
     --token-file artifacts/vocab_candidates/selected_tokens_v1.txt \
-    --base-model swiss-ai/Apertus-8B-Instruct-2509 \
+    --base-model swiss-ai/Apertus-8B-2509 \
     --output-dir artifacts/tokenizers/apertus-greek-cga-v1 \
     --model-output-dir "${SCRATCH}/apertus-greek-cga-v1" \
     --trust-remote-code --torch-dtype bfloat16 \
@@ -88,9 +88,9 @@ Syllable Constraints: Επιβάλλουμε περιορισμούς ώστε �
 
 # 4. Αξιολόγηση (μετά το pipeline)
 ./run_uenv.sh python evaluation/evaluate_greek_mmlu.py \
-  --base-model swiss-ai/Apertus-8B-Instruct-2509 \
   --trained-model "${SCRATCH}/apertus-greek-cga-v1" \
-  --output-json artifacts/reports/greek_mmlu_cga_eval.json
+  --num-few-shot 5 \
+  --output-json artifacts/reports/greek_mmlu_cga_eval_base.json
 ```
 
 ### Βασικές παράμετροι (Key options)

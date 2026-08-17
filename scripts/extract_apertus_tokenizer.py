@@ -4,7 +4,7 @@ from pathlib import Path
 from tokenizer_extract_common import build_parser, extract_tokenizer
 
 
-DEFAULT_MODEL_ID = "swiss-ai/Apertus-8B-Instruct-2509"
+DEFAULT_MODEL_ID = "swiss-ai/Apertus-8B-2509"
 DEFAULT_OUTPUT_DIR = Path("artifacts/tokenizers/apertus-base")
 DEFAULT_REPORT_PATH = Path("artifacts/reports/tokenizer_baseline.json")
 DEFAULT_READABLE_TOKENIZER_PATH = Path("artifacts/tokenizers/apertus-base/tokenizer_readable.json")

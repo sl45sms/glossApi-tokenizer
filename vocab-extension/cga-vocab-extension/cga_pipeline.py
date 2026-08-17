@@ -23,16 +23,16 @@ Output:
 
 Usage:
     # Full CGA pipeline with model initialization
-    python vocab-extension/cga_pipeline.py \
+    python vocab-extension/cga-vocab-extension/cga_pipeline.py \
         --base-tokenizer artifacts/tokenizers/apertus-base \
         --token-file artifacts/vocab_candidates/selected_tokens_v1.txt \
-        --base-model swiss-ai/Apertus-8B-Instruct-2509 \
+        --base-model swiss-ai/Apertus-8B-2509 \
         --output-dir artifacts/tokenizers/apertus-greek-cga-v1 \
         --model-output-dir /scratch/$USER/apertus-greek-cga-v1 \
         --trust-remote-code --torch-dtype bfloat16
 
     # Tokenizer-only (no model loading)
-    python vocab-extension/cga_pipeline.py \
+    python vocab-extension/cga-vocab-extension/cga_pipeline.py \
         --base-tokenizer artifacts/tokenizers/apertus-base \
         --token-file artifacts/vocab_candidates/selected_tokens_v1.txt \
         --output-dir artifacts/tokenizers/apertus-greek-cga-v1
@@ -50,7 +50,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 # Ensure repo root is on path
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -583,7 +583,7 @@ def run_cga_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
         compound_candidates: List[str] = []
         for token in tokens_to_add:
             clean = token.lstrip("Ġ▁ ")
-            if clean not in ft_model:
+            if not ft_model.is_in_vocab(clean):
                 compound_candidates.append(token)
 
         if compound_candidates:
@@ -618,12 +618,11 @@ def run_cga_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
         fallback_strategy="skip",  # We'll handle fallback ourselves
     )
 
-    # Merge in compound embeddings
+    # Merge in compound embeddings (overwrite if FastTextSubwordModel guessed it)
     for token, emb in compound_embeddings.items():
-        if token not in cga_initialized:
-            cga_initialized[token] = torch.from_numpy(emb).to(
-                device=input_embeddings.device, dtype=input_embeddings.dtype,
-            )
+        cga_initialized[token] = torch.from_numpy(emb).to(
+            device=input_embeddings.device, dtype=input_embeddings.dtype,
+        )
 
     # For remaining tokens, fall back to mean
     for token in tokens_to_add:
