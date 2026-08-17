@@ -28,7 +28,7 @@ cd /users/${USER}/glossApi-Tokenizer
   vocab-extension/distil-vocab-extension/unified_token_distill.py \
   --token-file artifacts/vocab_candidates/selected_tokens_v1.txt \
   --base-tokenizer artifacts/tokenizers/apertus-base \
-  --base-model swiss-ai/Apertus-8B-Instruct-2509 \
+  --base-model swiss-ai/Apertus-8B-2509 \
   --extended-tokenizer artifacts/tokenizers/apertus-greek-v1 \
   --output-dir "${SCRATCH}/apertus-greek-tokenizer-distill-unified" \
   --init-strategy retok-distill \
@@ -64,6 +64,7 @@ Use the dedicated launcher:
 cd /users/${USER}/glossApi-Tokenizer
 
 # Optional overrides
+
 export OUTPUT_DIR="/capstor/scratch/cscs/${USER}/apertus-greek-tokenizer-distill-unified"
 export DISTILL_STEPS=500
 export DISTILL_LR=5e-6

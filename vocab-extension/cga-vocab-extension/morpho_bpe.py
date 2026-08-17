@@ -33,16 +33,17 @@ _GREEK_TONOS: FrozenSet[str] = frozenset("άέήίόύώΆΈΉΊΌΎΏ")
 # Valid two-consonant onsets in Modern Greek
 _VALID_ONSET_PAIRS: FrozenSet[str] = frozenset([
     "μπ", "ντ", "γκ", "γγ", "τζ", "τσ",
-    "βλ", "βρ", "γλ", "γρ", "δρ", "θλ", "θρ", "θλ",
+    "βλ", "βρ", "γλ", "γρ", "δρ", "θλ", "θρ",
     "κλ", "κν", "κρ", "κτ", "μν", "πλ", "πν", "πρ", "πτ",
     "σβ", "σγ", "σδ", "σθ", "σκ", "σμ", "σπ", "στ", "σφ", "σχ",
     "τρ", "φθ", "φλ", "φρ", "χλ", "χρ", "χτ",
-    "βγ", "γδ", "φθ", "χθ",
+    "βγ", "γδ", "χθ",
 ])
 
 # Valid three-consonant onsets
 _VALID_TRIPLE_ONSETS: FrozenSet[str] = frozenset([
-    "στρ", "σκλ", "σκν", "σκρ", "σπλ", "σπρ", "στρ", "σφρ", "σχλ",
+    "στρ", "σκλ", "σκν", "σκρ", "σπλ", "σπρ", "σφρ", "σχλ",
+    "μπρ", "ντρ", "γκρ", "μπλ", "ντλ", "γκλ"
 ])
 
 
@@ -162,13 +163,10 @@ def token_violates_greek_syllable_boundary(token: str) -> bool:
             greek_chars[j][1].lower()
             for j in range(match.start(), match.end())
         )
-        if cluster[:3].lower() not in _VALID_TRIPLE_ONSETS:
-            # Check if any subset is valid
-            if not any(
-                cluster[i : i + 2].lower() in _VALID_ONSET_PAIRS
-                for i in range(len(cluster) - 1)
-            ):
-                return True
+        if len(cluster) > 3:
+            return True
+        if len(cluster) == 3 and cluster.lower() not in _VALID_TRIPLE_ONSETS:
+            return True
 
     return False
 

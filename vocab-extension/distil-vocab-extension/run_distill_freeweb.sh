@@ -1,18 +1,18 @@
 #!/bin/bash
 #SBATCH -A a0140
-#SBATCH --job-name=token-distill-v18
+#SBATCH --job-name=token-distill-v19
 #SBATCH --partition=normal
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=200G
 #SBATCH --time=12:00:00
-#SBATCH --output=/iopsstor/scratch/cscs/%u/logs/distill_v18_%j.out
-#SBATCH --error=/iopsstor/scratch/cscs/%u/logs/distill_v18_%j.err
+#SBATCH --output=/iopsstor/scratch/cscs/%u/logs/distill_v19_%j.out
+#SBATCH --error=/iopsstor/scratch/cscs/%u/logs/distill_v19_%j.err
 #SBATCH --mail-type=FAIL,END
 #SBATCH --mail-user=panagiotis@skarvelis.gr
 
-VERSION="v18"
+VERSION="v19"
 PROJECT_DIR="/users/p-skarvelis/glossApi-Tokenizer"
 cd "${PROJECT_DIR}"
 
@@ -31,7 +31,7 @@ echo " GPU: 4, Samples: 5000, Steps: 500, Batch: 16"
 echo " Contexts/token: 8, Max seq len: 1024, LR warmup: 50 steps"
 echo " LR: 1e-5, Reg weight: 0.1, Stream timeout: 600s"
 echo " FineWeb2-HQ cache: ${HF_DATASETS_CACHE}"
-echo " Log: ${LOG_DIR}/distill_v18_${SLURM_JOB_ID}_console.log"
+echo " Log: ${LOG_DIR}/distill_v19_${SLURM_JOB_ID}_console.log"
 echo "========================================="
 
 # Unified distillation with distributed torchrun on all local GPUs.
@@ -39,9 +39,9 @@ echo "========================================="
   ${PROJECT_DIR}/vocab-extension/distil-vocab-extension/unified_token_distill.py \
   --token-file ${PROJECT_DIR}/artifacts/vocab_candidates/selected_tokens_v1.txt \
   --base-tokenizer ${PROJECT_DIR}/artifacts/tokenizers/apertus-base \
-  --base-model swiss-ai/Apertus-8B-Instruct-2509 \
+  --base-model swiss-ai/Apertus-8B-2509 \
   --extended-tokenizer ${PROJECT_DIR}/artifacts/tokenizers/apertus-greek-v1 \
-  --output-dir "${SCRATCH}/apertus-greek-tokenizer-distill-unified-${VERSION}" \
+  --output-dir "${SCRATCH}/apertus-greek-tokenizer-distill-unified-freeweb-${VERSION}" \
   --init-strategy retok-distill \
   --torch-dtype bfloat16 \
   --attn-implementation sdpa \
@@ -59,7 +59,7 @@ echo "========================================="
   --distill-checkpoint-interval 100 \
   --fineweb2-cache-dir "${SCRATCH}/FineWeb2-HQ" \
   --require-xielu \
-  2>&1 | tee "${LOG_DIR}/distill_v18_${SLURM_JOB_ID}_console.log"
+  2>&1 | tee "${LOG_DIR}/distill_v19_${SLURM_JOB_ID}_console.log"
 
 echo "========================================="
 echo " Done — $(date)"

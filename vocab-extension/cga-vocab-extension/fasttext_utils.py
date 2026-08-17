@@ -86,6 +86,12 @@ class FastTextVectorModel:
     def __contains__(self, word: str) -> bool:
         return word in self.word_to_vec
 
+    def is_in_vocab(self, word: str) -> bool:
+        return word in self.word_to_vec
+
+    def get_words(self) -> List[str]:
+        return list(self.word_to_vec.keys())
+
     def __len__(self) -> int:
         return len(self.word_to_vec)
 
@@ -156,6 +162,16 @@ class FastTextSubwordModel:
         if self._model is None:
             raise RuntimeError("Model not loaded. Call load_bin() first.")
         return np.array(self._model.get_word_vector(word), dtype=np.float32)
+
+    def is_in_vocab(self, word: str) -> bool:
+        if self._model is None:
+            return False
+        return self._model.get_word_id(word) != -1
+
+    def get_words(self) -> List[str]:
+        if self._model is None:
+            return []
+        return self._model.get_words()
 
     def __contains__(self, word: str) -> bool:
         # Subword models can produce vectors for any string
@@ -269,13 +285,7 @@ def extract_anchor_tokens(
 
     # Find overlaps
     anchors: List[str] = []
-    # Handle both old (word_to_vec) and new (words) FastText APIs
-    if hasattr(ft_model, 'words'):
-        ft_words = ft_model.words
-    elif hasattr(ft_model, 'word_to_vec'):
-        ft_words = ft_model.word_to_vec.keys()
-    else:
-        ft_words = list(ft_model.get_words())
+    ft_words = ft_model.get_words()
 
     for ft_word in ft_words:
         norm = normalize_greek_token_for_matching(ft_word)

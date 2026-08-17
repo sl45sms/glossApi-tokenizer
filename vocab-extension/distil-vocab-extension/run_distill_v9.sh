@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH -A a0140
-#SBATCH --job-name=token-distill-v8
+#SBATCH --job-name=token-distill-v9
 #SBATCH --partition=normal
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4
@@ -20,9 +20,9 @@ echo "========================================="
   ${PROJECT_DIR}/vocab-extension/distil-vocab-extension/unified_token_distill.py \
   --token-file ${PROJECT_DIR}/artifacts/vocab_candidates/selected_tokens_v1.txt \
   --base-tokenizer ${PROJECT_DIR}/artifacts/tokenizers/apertus-base \
-  --base-model swiss-ai/Apertus-8B-Instruct-2509 \
+  --base-model swiss-ai/Apertus-8B-2509 \
   --extended-tokenizer ${PROJECT_DIR}/artifacts/tokenizers/apertus-greek-v1 \
-  --output-dir "${SCRATCH}/apertus-greek-tokenizer-distill-unified-v8" \
+  --output-dir "${SCRATCH}/apertus-greek-tokenizer-distill-unified-v9" \
   --init-strategy retok-distill \
   --torch-dtype bfloat16 \
   --attn-implementation sdpa \
