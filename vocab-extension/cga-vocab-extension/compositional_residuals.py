@@ -268,12 +268,13 @@ class CompositionalEmbeddingModel(torch.nn.Module):
         result = self.alpha * E_root + self.beta * E_suffix + self.gamma * (E_root * E_suffix)
         return result
 
-    def compose_numpy(self, E_root: np.ndarray, E_suffix: np.ndarray) -> np.ndarray:
+    def compose_numpy(self, E_root: np.ndarray, E_suffix: np.ndarray, E_prefix: Optional[np.ndarray] = None) -> np.ndarray:
         """Compose using numpy (no gradients needed)."""
         with torch.no_grad():
             root_t = torch.from_numpy(E_root).float()
             suffix_t = torch.from_numpy(E_suffix).float()
-            result = self.forward(root_t, suffix_t)
+            prefix_t = torch.from_numpy(E_prefix).float() if E_prefix is not None else None
+            result = self.forward(root_t, suffix_t, prefix_t)
             return result.numpy()
 
 
@@ -323,10 +324,12 @@ def compute_compositional_embedding(
         suffix_vec = np.asarray(E_suffix_vec, dtype=np.float32) if E_suffix_vec is not None else root_vec.copy()
 
         if composition_model is not None:
-            composed = composition_model.compose_numpy(root_vec, suffix_vec)
+            composed = composition_model.compose_numpy(root_vec, suffix_vec, E_prefix_vec)
         else:
             # Simple average with slight root bias
             composed = 0.6 * root_vec + 0.4 * suffix_vec
+            if E_prefix_vec is not None:
+                composed = 0.4 * E_prefix_vec + 0.6 * composed
 
         # Project to LLM space
         if aligner is not None and aligner.fitted:
